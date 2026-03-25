@@ -28,14 +28,18 @@ Os dados coletados são armazenados em um arquivo `.csv`, podendo ser utilizados
 ## ⚙️ Como executar o projeto
 
 ### 1. Clone o repositório
-git clone https://github.com/seu-usuario/seu-repositorio.git  
-cd seu-repositorio
-
+```bash
+git clone https://github.com/Projeto-Systrain-Track/scripts-python-systrain.git
+cd scripts-python-systrain
+```
 ### 2. Instale as dependências
+```bash
 pip install psutil
-
+```
 ### 3. Execute o script de coleta ou o de leitura
+```bash
 python escrita.py
+```
 
 ---
 
