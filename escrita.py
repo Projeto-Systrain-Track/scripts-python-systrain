@@ -32,22 +32,19 @@ def upload_file(file_name, bucket, object_name=None):
     # Upload the file
     s3_client = boto3.client(
     's3',
-#    aws_access_key_id='',
-#    aws_secret_access_key='',
-#    aws_session_token=''
+    aws_access_key_id='x',
+    aws_secret_access_key='y',
+    aws_session_token='z'
     )
 
     try:
-        response = s3_client.upload_file(path_to_csv, 'bucket name', object_name)
+        response = s3_client.upload_file(path_to_csv, 's3-raw-lab-202604061333', object_name)
     except ClientError as e:
         logging.error(e)
         return False
     return True
 
-upload_file(path_to_csv, 'bucket name')
 # ===================================================== #
-
-p = psutil.Process()
 
 def listar_processos():
     return [proc.info for proc in psutil.process_iter(attrs=['pid', 'name', 'username', 'cpu_percent', 'memory_info'])]
@@ -61,6 +58,7 @@ def captura_dados():
 
         CONTADOR += 1
 
+        p = psutil.Process()
         processos = listar_processos()
 
         porcentagem_uso_da_cpu = psutil.cpu_percent(INTERVALO)
@@ -114,7 +112,7 @@ def captura_dados():
         final_io = psutil.disk_io_counters()
 
         if (CONTADOR == 3):
-            upload_file()
+            upload_file(path_to_csv, 's3-raw-lab-202604061333')
             CONTADOR = 0
    
 captura_dados()
