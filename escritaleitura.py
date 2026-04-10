@@ -53,8 +53,8 @@ while True:
     # adiciona na memória
     dados.append(linha)
 
-    # limpa terminal no Linux
-    os.system("clear")
+    # limpa terminal em qualquer OS
+    os.system('cls' if os.name == 'nt' else 'clear')
 
     print(f"CPU: {cpu_info}%")
     print(f"RAM usada: {ram_info.used}")

@@ -1,30 +1,89 @@
-import csv
-import psutil
-import time
-import os
-from datetime import datetime
+from datetime import date, datetime
+import pandas as pd;
+import psutil;
+import time;
+import csv;
+import os;
 
-nome_arquivo = 'registros.csv'
+# ============= Imports p/ S3 ============= #
+import logging
+import boto3
+from botocore.exceptions import ClientError
+# ========================================= #
 
-with open(nome_arquivo, mode='w', newline='') as arquivo:
-    escrever=csv.writer(arquivo, delimiter=';')
-    escrever.writerow(['USO_CPU', 'DISK(troughput)', 'MEMORIA_RAM(total, usado)'])
+path_to_csv = (f"{datetime.now().day}-{datetime.now().month}-{datetime.now().year}-{datetime.now().hour}:{datetime.now().minute}.csv")
+INTERVALO = 5
+#CONTADOR = 0
+    
+p = psutil.Process()
 
-while True:
-    disk_info1 = psutil.disk_io_counters()
-    time.sleep(1)
-    disk_info2 = psutil.disk_io_counters()
-    tempo1 = disk_info1.write_count + disk_info1.read_count
-    tempo2 = disk_info2.write_count + disk_info2.read_count
-    delta_tempo = tempo2 - tempo1
-    uso_disco = round(((delta_tempo / 1000) * 100) , 2)
-    dataHora = datetime.now().strftime('%d-%m-%Y  %H:%M:%S')
-    cpu_info = psutil.cpu_percent()
-    ram_info = psutil.virtual_memory()
+def listar_processos():
+    return [proc.info for proc in psutil.process_iter(attrs=['pid', 'name', 'username', 'cpu_percent', 'memory_info'])]
 
-    with open(nome_arquivo, mode='a', newline='') as arquivo:
-        escrever = csv.writer(arquivo, delimiter=';')
-        escrever.writerow([cpu_info, ram_info.used, uso_disco, dataHora])
-    os.system('cls')
-    print(f"CPU: {cpu_info} | RAM : {ram_info.used} | DISCO: {uso_disco}%| DATAHORA: {dataHora}")
-    time.sleep(1)
+def captura_dados():
+    final_io = psutil.disk_io_counters()
+
+    pular = "\n" * 2
+
+    while True: 
+
+#        CONTADOR += 1
+
+        processos = listar_processos()
+
+        porcentagem_uso_da_cpu = psutil.cpu_percent(INTERVALO)
+        cpu_freq = psutil.cpu_freq()
+
+        porcentagem_uso_do_disco = psutil.disk_usage("/").percent 
+        initial_io = psutil.disk_io_counters()
+        
+        read_bytes_diff = initial_io.read_bytes - final_io.read_bytes 
+        write_bytes_diff = initial_io.write_bytes - final_io.write_bytes
+        
+        read_rate_Bps = read_bytes_diff / INTERVALO
+        write_rate_Bps = write_bytes_diff / INTERVALO
+        
+        memoria = psutil.virtual_memory();  
+        memoria_total = memoria.total;  
+        memoria_disponivel = memoria.available
+        memoria_percentual = (memoria_disponivel / memoria_total) * 100
+
+        timestamp_atual = datetime.now()
+
+        timestamp_formatado = timestamp_atual.isoformat()
+
+        new_row_dataframe = pd.DataFrame({
+            "usuario": [os.getlogin()],
+            "porcentagem_uso_da_cpu": [porcentagem_uso_da_cpu],
+            "frequencia_atual": [int(cpu_freq.current)],
+            "frequencia_min": [int(cpu_freq.min)],
+            "frequencia_max": [int(cpu_freq.max)],
+            "porcentagem_uso_do_disco": [porcentagem_uso_do_disco],
+            "read_rate_Bps": [int(read_rate_Bps)],
+            "write_rate_Bps": [int(write_rate_Bps)],
+            "memoria_percentual": [int(memoria_percentual)],
+            "memoria_total": [int(memoria_total)],
+            "memoria_livre": [int(memoria_disponivel)],
+            "processos": [str(processos)],
+            "data": [timestamp_formatado]
+        })
+
+
+        if not os.path.exists(path_to_csv):
+            new_row_dataframe.to_csv(path_to_csv, mode='a', index=False, header=True)
+            print(new_row_dataframe)
+
+        else:
+            new_row_dataframe.to_csv(path_to_csv, mode='a', index=False, header=False)
+            print(new_row_dataframe)
+
+
+        time.sleep(INTERVALO)    
+        final_io = psutil.disk_io_counters()
+
+#        if (CONTADOR == 60):
+#            upload_file()
+#            CONTADOR = 0
+
+   
+captura_dados()
