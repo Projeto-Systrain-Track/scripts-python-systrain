@@ -13,9 +13,8 @@ from botocore.exceptions import ClientError
 
 path_to_csv = (f"{datetime.now().day}-{datetime.now().month}-{datetime.now().year}-{datetime.now().hour}:{datetime.now().minute}.csv")
 INTERVALO = 5
-CONTADOR = 0
     
-# ============== FUNÇÃO DE ENVIO PARA S3 ============== #
+# ============== FUNÇÃO DE ENVIO PARA S3 BRONZE ============== #
 def upload_file(file_name, bucket, object_name=None):
     """Upload a file to an S3 bucket
 
@@ -32,13 +31,13 @@ def upload_file(file_name, bucket, object_name=None):
     # Upload the file
     s3_client = boto3.client(
     's3',
-    aws_access_key_id='x',
-    aws_secret_access_key='y',
-    aws_session_token='z'
+    aws_access_key_id='',
+    aws_secret_access_key='',
+    aws_session_token=''
     )
 
     try:
-        response = s3_client.upload_file(path_to_csv, 's3-raw-lab-202604061333', object_name)
+        response = s3_client.upload_file(path_to_csv, 'raw bucket name', object_name)
     except ClientError as e:
         logging.error(e)
         return False
@@ -51,8 +50,9 @@ def listar_processos():
 
 def captura_dados():
     final_io = psutil.disk_io_counters()
-
     pular = "\n" * 2
+
+    CONTADOR = 0
 
     while True: 
 
@@ -111,8 +111,8 @@ def captura_dados():
         time.sleep(INTERVALO)    
         final_io = psutil.disk_io_counters()
 
-        if (CONTADOR == 3):
-            upload_file(path_to_csv, 's3-raw-lab-202604061333')
+        if (CONTADOR == 60):
+            upload_file(path_to_csv, 'raw bucket name')
             CONTADOR = 0
    
 captura_dados()
