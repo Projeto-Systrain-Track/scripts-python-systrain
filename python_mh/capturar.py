@@ -27,14 +27,16 @@ def listar_processos():
     return [p.info for p in psutil.process_iter(attrs=attrs)]
 
 
-def medir_latencia(host="8.8.8.8", port=53, timeout=2):
+def medir_latenciadef():
     try:
-        inicio = time.perf_counter()
-        with socket.create_connection((host, port), timeout=timeout):
-            fim = time.perf_counter()
-        return round((fim - inicio) * 1000, 2)
-    except Exception:
-        return None
+        st = speedtest.Speedtest()
+        download_speed = st.download()
+        upload_speed = st.upload()
+        ping = st.results.ping
+        return download_speed, upload_speed, ping
+    except Exception as e:
+        print("Erro ao testar velocidade:", e)
+        return 0, 0, 0
 
 
 def pegar_valores():
@@ -43,7 +45,10 @@ def pegar_valores():
     mac_address = ':'.join(
         ['{:02x}'.format((mac_num >> i) & 0xff) for i in range(0, 48, 8)][::-1]
     )
-
+    
+    ultimo_download = 0
+    ultimo_upload = 0
+    ultimo_ping = 0
 
     try:
         usuario = os.getlogin()
@@ -65,7 +70,13 @@ def pegar_valores():
 
     io_final = psutil.disk_io_counters()
     net_final = psutil.net_io_counters()
+    
+    if CONTADOR == 1 or CONTADOR % 6 == 0:
+        ultimo_download, ultimo_upload, ultimo_ping = captura_velocidade()
 
+    download_speed = ultimo_download
+    upload_speed = ultimo_upload
+    ping = ultimo_ping
 
     read_rate_Bps = (io_final.read_bytes - io_inicial.read_bytes) / INTERVALO
     write_rate_Bps = (io_final.write_bytes - io_inicial.write_bytes) / INTERVALO
@@ -80,9 +91,9 @@ def pegar_valores():
     new = pd.DataFrame([{
         "mac_address": mac_address,
         "usuario": usuario,
-        "frequencia_atual": int(cpu_freq.current) if cpu_freq else None,
-        "frequencia_min": int(cpu_freq.min) if cpu_freq else None,
-        "frequencia_max": int(cpu_freq.max) if cpu_freq else None,
+        "frequencia_atual": int(cpu_freq.current),
+        "frequencia_min": int(cpu_freq.min),
+        "frequencia_max": int(cpu_freq.max),
         "read_rate_Bps": int(read_rate_Bps),
         "write_rate_Bps": int(write_rate_Bps),
         "download_rate_Bps": int(download_rate_Bps),
@@ -90,6 +101,9 @@ def pegar_valores():
         "latencia_ms": latencia_ms,
         "memoria_total": int(memoria.total),
         "memoria_livre": int(memoria.available),
+        "download_mbps": [str(download_speed)],
+        "upload_mbps": [str(upload_speed)],
+        "ping_ms": [str(ping)],
         "processos": str(processos),
         "data": timestamp_formatado
     }])
