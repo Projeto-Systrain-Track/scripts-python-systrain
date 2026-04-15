@@ -37,6 +37,10 @@ CONTADOR = 0
 
 
 
+
+
+
+
 def listar_processos():
     return [proc.info for proc in psutil.process_iter(attrs=['pid', 'name', 'username', 'cpu_percent', 'memory_info'])]
 
