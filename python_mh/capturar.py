@@ -1,97 +1,121 @@
 from datetime import datetime
 import pandas as pd
 import psutil
-import boto3
-import s3fs
 import uuid
 import time
 import os
+import socket
 
 
-BUCKET_PATH = 's3://rbc-train-track-sys/data.csv'
+# BUCKET_PATH = 's3://rbc-train-track-sys/data.csv'
 INTERVALO = 5
 
+# aws_keys = {
+#     "key": "123",
+#     "secret": "321",
+#     "token": "000999000"
+# }
 
-aws_keys = {
-    "key":          "123",
-    "secret":       "321",
-    "token":        "000999000"
-}
+attrs = [
+    'pid', 'name', 'username', 'status', 'create_time',
+    'cpu_percent', 'memory_info', 'num_threads',
+    'cmdline', 'exe', 'cpu_times', 'memory_percent'
+]
+
 
 def listar_processos():
-    return [p.info['name'] for p in psutil.process_iter(['pid', 'name', 'username', 'cpu_percent', 'memory_info'])]
+    return [p.info for p in psutil.process_iter(attrs=attrs)]
+
+
+def medir_latencia(host="8.8.8.8", port=53, timeout=2):
+    try:
+        inicio = time.perf_counter()
+        with socket.create_connection((host, port), timeout=timeout):
+            fim = time.perf_counter()
+        return round((fim - inicio) * 1000, 2)
+    except Exception:
+        return None
+
 
 def pegar_valores():
-    #############################################
-    #############################################
+
     mac_num = uuid.getnode()
-    mac_address = ':'.join(['{:02x}'.format((mac_num >> i) & 0xff) for i in range(0, 48, 8)][::-1])
-    #############################################
-    #############################################
-    usuario = os.getlogin()
-    #############################################
-    #############################################
+    mac_address = ':'.join(
+        ['{:02x}'.format((mac_num >> i) & 0xff) for i in range(0, 48, 8)][::-1]
+    )
+
+
+    try:
+        usuario = os.getlogin()
+    except Exception:
+        usuario = os.environ.get("USERNAME") or os.environ.get("USER") or "desconhecido"
+
+
     cpu_freq = psutil.cpu_freq()
     memoria = psutil.virtual_memory()
-    #############################################
-    #############################################
+
+
     io_inicial = psutil.disk_io_counters()
+    net_inicial = psutil.net_io_counters()
+    latencia_ms = medir_latencia()
+
+
     time.sleep(INTERVALO)
+
+
     io_final = psutil.disk_io_counters()
-    #############################################
-    #############################################
+    net_final = psutil.net_io_counters()
+
+
     read_rate_Bps = (io_final.read_bytes - io_inicial.read_bytes) / INTERVALO
     write_rate_Bps = (io_final.write_bytes - io_inicial.write_bytes) / INTERVALO
-    #############################################
-    #############################################
+
+
+    download_rate_Bps = (net_final.bytes_recv - net_inicial.bytes_recv) / INTERVALO
+    upload_rate_Bps = (net_final.bytes_sent - net_inicial.bytes_sent) / INTERVALO
+
     processos = listar_processos()
     timestamp_formatado = datetime.now().isoformat()
-    #############################################
-    #############################################
+
     new = pd.DataFrame([{
         "mac_address": mac_address,
         "usuario": usuario,
-        "frequencia_atual": int(cpu_freq.current),
-        "frequencia_min": int(cpu_freq.min),
-        "frequencia_max": int(cpu_freq.max),
+        "frequencia_atual": int(cpu_freq.current) if cpu_freq else None,
+        "frequencia_min": int(cpu_freq.min) if cpu_freq else None,
+        "frequencia_max": int(cpu_freq.max) if cpu_freq else None,
         "read_rate_Bps": int(read_rate_Bps),
         "write_rate_Bps": int(write_rate_Bps),
+        "download_rate_Bps": int(download_rate_Bps),
+        "upload_rate_Bps": int(upload_rate_Bps),
+        "latencia_ms": latencia_ms,
         "memoria_total": int(memoria.total),
         "memoria_livre": int(memoria.available),
         "processos": str(processos),
         "data": timestamp_formatado
     }])
-    
+
     return new
 
+
 def atualizar_s3(novo_df):
-    # Configuramos as opções de armazenamento com suas chaves e token
-    storage_options = {
-        "key": aws_keys["key"],
-        "secret": aws_keys["secret"],
-        "token": aws_keys["token"]
-    }
-    
-    try:
 
-        df_existente = pd.read_csv(BUCKET_PATH, storage_options=storage_options)
-        df_final = pd.concat([df_existente, novo_df], ignore_index=True)
-        print("Arquivo existente carregado.")
-    except Exception as e:
+    # storage_options = {
+    #     "key": aws_keys["key"],
+    #     "secret": aws_keys["secret"],
+    #     "token": aws_keys["token"]
+    # }
 
-        print(f"Criando novo arquivo ou erro ao ler: {e}")
-        df_final = novo_df
-    
+    # try:
+    #     df_existente = pd.read_csv(BUCKET_PATH, storage_options=storage_options)
+    #     df_final = pd.concat([df_existente, novo_df], ignore_index=True)
 
-    df_final.to_csv(BUCKET_PATH, index=False, storage_options=storage_options)
+    # except Exception as e:
 
-    dados_atuais = pegar_valores()
-    atualizar_s3(dados_atuais)
-    
-    print(f"Dados enviados com sucesso às {datetime.now()}")
+    df_final = novo_df
 
+    # df_final.to_csv(BUCKET_PATH, index=False, storage_options=storage_options)
 
-
+    df_final.to_csv('./novo.csv', index=False)
 
 dados_atuais = pegar_valores()
 atualizar_s3(dados_atuais)
