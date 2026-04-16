@@ -10,7 +10,7 @@ import boto3
 import logging
 from botocore.exceptions import ClientError
 
-INTERVALO_SEGUNDOS = 3
+INTERVALO_SEGUNDOS = 2
 
 ATRIBUTOS_PROCESSOS = [
     'pid', 'name', 'username', 'status', 'create_time',
@@ -42,20 +42,24 @@ def limpar_terminal():
 
 def medir_ping(host="8.8.8.8"):
     try:
+        parametro = "-n" if os.name == "nt" else "-c"
         resultado = subprocess.run(
-            ["ping", "-n", "1", host],
+            ["ping", parametro, "1", host],
             capture_output=True,
-            text=True
+            text=True,
+            timeout=5  
         )
 
         for linha in resultado.stdout.split("\n"):
-            if "tempo=" in linha.lower():
-                tempo = linha.split("tempo=")[1].split("ms")[0]
-                return int(tempo)
-
+            if "tempo=" in linha.lower() or "time=" in linha.lower():
+                parte = linha.lower()
+                sep = "tempo=" if "tempo=" in parte else "time="
+                tempo = parte.split(sep)[1].split("ms")[0].strip()
+                return int(float(tempo))
         return 0
     except:
         return 0
+    
 
 
 
@@ -64,7 +68,7 @@ def listar_processos_filtrados():
 
     for processo in psutil.process_iter(attrs=ATRIBUTOS_PROCESSOS):
         try:
-            if processo.info['memory_percent'] >= 5:
+            if processo.info['memory_percent'] >= 2.5:
                 processos_filtrados.append(processo.info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -120,16 +124,20 @@ def coletar_metricas_sistema():
         io_disco_final.write_bytes - io_disco_inicial.write_bytes
     ) / INTERVALO_SEGUNDOS
 
-    taxa_download_rede_bytes_por_segundo = (
-        io_rede_final.bytes_recv - io_rede_inicial.bytes_recv
-    ) / INTERVALO_SEGUNDOS
-
-    taxa_upload_rede_bytes_por_segundo = (
-        io_rede_final.bytes_sent - io_rede_inicial.bytes_sent
-    ) / INTERVALO_SEGUNDOS
+    if io_rede_inicial and io_rede_final:
+        taxa_download_rede_bytes_por_segundo = (
+            io_rede_final.bytes_recv - io_rede_inicial.bytes_recv
+        ) / INTERVALO_SEGUNDOS
+        taxa_upload_rede_bytes_por_segundo = (
+            io_rede_final.bytes_sent - io_rede_inicial.bytes_sent
+        ) / INTERVALO_SEGUNDOS
+    else:
+        taxa_download_rede_bytes_por_segundo = 0
+        taxa_upload_rede_bytes_por_segundo = 0
 
     lista_processos = listar_processos_filtrados()
-    
+    qtd_processos = len(lista_processos)
+
     data_hora_iso = datetime.now().isoformat()
 
 
@@ -166,6 +174,7 @@ def coletar_metricas_sistema():
         "taxa_upload_rede_bytes_por_segundo": int(taxa_upload_rede_bytes_por_segundo),
 
         "processos": str(lista_processos),
+        "qtd_processos": qtd_processos,
         "data_hora_iso": data_hora_iso
     }])
     
@@ -219,7 +228,9 @@ def iniciar_captura():
     
     dados = df_atual.iloc[0]
     limpar_terminal()
+    exibir_terminal(dados)
 
+def exibir_terminal(dados):
     print(Fore.GREEN + "==========================================")
     print(Fore.GREEN + "📊 MONITORAMENTO EM TEMPO REAL")
     print(Fore.GREEN + "==========================================\n")
@@ -251,7 +262,7 @@ def iniciar_captura():
     print(Fore.MAGENTA + f"   ↑ {dados['taxa_upload_rede_bytes_por_segundo']} B/s\n")
 
     print(Fore.WHITE + "⚙ PROCESSOS")
-    print(Fore.YELLOW + f"   Processos críticos: {len(eval(dados['processos']))}\n")
+    print(Fore.YELLOW + f"   Processos críticos: {dados['qtd_processos']}\n")
     print(Fore.GREEN + "==========================================")
 
     
