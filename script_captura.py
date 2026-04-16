@@ -4,15 +4,41 @@ import psutil
 import uuid
 import time
 import os
+from colorama import Fore, Style, init
 import subprocess
+import boto3
+import logging
+from botocore.exceptions import ClientError
 
-INTERVALO_SEGUNDOS = 5
+INTERVALO_SEGUNDOS = 3
 
 ATRIBUTOS_PROCESSOS = [
     'pid', 'name', 'username', 'status', 'create_time',
     'cpu_percent', 'memory_info', 'num_threads',
     'cmdline', 'exe', 'cpu_times', 'memory_percent'
 ]
+
+
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id='',
+    aws_secret_access_key='',
+    aws_session_token=''
+)
+
+init(autoreset=True)
+
+def cor_status(valor, limite1=60, limite2=80):
+    if valor >= limite2:
+        return Fore.RED
+    elif valor >= limite1:
+        return Fore.YELLOW
+    else:
+        return Fore.GREEN
+
+
+def limpar_terminal():
+    os.system('cls' if os.name == 'nt' else 'clear')
 
 def medir_ping(host="8.8.8.8"):
     try:
@@ -31,6 +57,8 @@ def medir_ping(host="8.8.8.8"):
     except:
         return 0
 
+
+
 def listar_processos_filtrados():
     processos_filtrados = []
 
@@ -43,10 +71,8 @@ def listar_processos_filtrados():
 
     return processos_filtrados
 
-
-
 def coletar_metricas_sistema():
-
+    
     mac_numero = uuid.getnode()
     endereco_mac = ':'.join(
         ['{:02x}'.format((mac_numero >> i) & 0xff) for i in range(0, 48, 8)][::-1]
@@ -56,8 +82,9 @@ def coletar_metricas_sistema():
         nome_usuario = os.getlogin()
     except Exception:
         nome_usuario = os.environ.get("USERNAME") or os.environ.get("USER") or "desconhecido"
+    
 
-    percentual_uso_cpu = psutil.cpu_percent(interval=1)
+    percentual_uso_cpu = psutil.cpu_percent(interval=None)
     frequencia_cpu = psutil.cpu_freq()
 
     frequencia_cpu_atual_mhz = round(frequencia_cpu.current, 2) if frequencia_cpu else 0
@@ -102,8 +129,9 @@ def coletar_metricas_sistema():
     ) / INTERVALO_SEGUNDOS
 
     lista_processos = listar_processos_filtrados()
-
+    
     data_hora_iso = datetime.now().isoformat()
+
 
     df_metricas = pd.DataFrame([{
         "endereco_mac": endereco_mac,
@@ -138,15 +166,96 @@ def coletar_metricas_sistema():
         "taxa_upload_rede_bytes_por_segundo": int(taxa_upload_rede_bytes_por_segundo),
 
         "processos": str(lista_processos),
-
         "data_hora_iso": data_hora_iso
     }])
-
+    
     return df_metricas
 
+def salvar_csv_local(df_metricas, nome_arquivo):
+    df_metricas.to_csv(
+        f'./{nome_arquivo}.csv',  
+        header=not os.path.exists(f'./{nome_arquivo}.csv'), 
+        index=False,
+        mode = "a"
+    )
+   
 
-def salvar_csv_local(df_metricas):
-    df_metricas.to_csv('./novo.csv', index=False)
 
-df_atual = coletar_metricas_sistema()
-salvar_csv_local(df_atual)
+
+def upload_arquivo_s3(caminho_arquivo_local, bucket, idMaquina, object_name=None):
+    if object_name is None:
+        object_name = os.path.basename(caminho_arquivo_local)
+
+    ano = datetime.now().strftime("%Y")
+    mes = datetime.now().strftime("%m")
+    dia = datetime.now().strftime("%d")
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+    try:
+        response = s3_client.upload_file(caminho_arquivo_local, bucket, f'raw/{ano}/{mes}/{dia}/dados_{timestamp}_{idMaquina}.csv')
+    except ClientError as e:
+        logging.error(e)
+        return False
+    return True
+
+
+print(Fore.GREEN + "==========================================")
+print(Fore.GREEN + "🚀 SYS TRAIN TRACK - MONITORAMENTO")
+print(Fore.GREEN + "==========================================\n")
+
+contador = 0
+def iniciar_captura():
+    global contador
+    
+    df_atual = coletar_metricas_sistema()
+    id_maquina = df_atual["endereco_mac"].iloc[0].replace(":", "")
+    nome_arquivo = f'dados_{id_maquina}'
+
+    salvar_csv_local(df_atual, nome_arquivo)
+    contador +=  1
+        
+    if (contador >= 60):
+        contador = 0
+        upload_arquivo_s3(bucket = "s3-raw-lab-202604061333-v2", idMaquina = id_maquina, caminho_arquivo_local = f"./{nome_arquivo}.csv")
+    
+    dados = df_atual.iloc[0]
+    limpar_terminal()
+
+    print(Fore.GREEN + "==========================================")
+    print(Fore.GREEN + "📊 MONITORAMENTO EM TEMPO REAL")
+    print(Fore.GREEN + "==========================================\n")
+
+    print(Fore.CYAN + f"👤 Usuário: {dados['nome_usuario']}")
+    print(Fore.CYAN + f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+    print(Fore.CYAN + f"⏱ Intervalo: {INTERVALO_SEGUNDOS}s\n")
+
+    cpu = dados["percentual_uso_cpu"]
+    ram = dados["percentual_uso_ram"]
+    disco = dados["percentual_uso_disco"]
+    ping = dados["latencia_ping_ms"]
+
+    print(Fore.WHITE + "🧠 CPU")
+    print(cor_status(cpu) + f"   Uso: {cpu:.1f}%")
+    print(Fore.WHITE + f"   Freq: {dados['frequencia_cpu_atual_mhz']} MHz\n")
+
+    print(Fore.WHITE + "💾 RAM")
+    print(cor_status(ram) + f"   Uso: {ram:.1f}%")
+    print(Fore.WHITE + f"   Livre: {dados['memoria_disponivel_bytes'] // (1024**3)} GB\n")
+
+    print(Fore.WHITE + "🗄 DISCO")
+    print(cor_status(disco) + f"   Uso: {disco:.1f}%")
+    print(Fore.WHITE + f"   Livre: {dados['disco_livre_bytes'] // (1024**3)} GB\n")
+
+    print(Fore.WHITE + "🌐 REDE")
+    print(Fore.CYAN + f"   Ping: {ping} ms")
+    print(Fore.MAGENTA + f"   ↓ {dados['taxa_download_rede_bytes_por_segundo']} B/s")
+    print(Fore.MAGENTA + f"   ↑ {dados['taxa_upload_rede_bytes_por_segundo']} B/s\n")
+
+    print(Fore.WHITE + "⚙ PROCESSOS")
+    print(Fore.YELLOW + f"   Processos críticos: {len(eval(dados['processos']))}\n")
+    print(Fore.GREEN + "==========================================")
+
+    
+
+while True:
+    iniciar_captura()
+    
