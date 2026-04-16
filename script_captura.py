@@ -10,14 +10,13 @@ import boto3
 import logging
 from botocore.exceptions import ClientError
 
-INTERVALO_SEGUNDOS = 2
+INTERVALO_SEGUNDOS = 3
 
 ATRIBUTOS_PROCESSOS = [
     'pid', 'name', 'username', 'status', 'create_time',
     'cpu_percent', 'memory_info', 'num_threads',
     'cmdline', 'exe', 'cpu_times', 'memory_percent'
 ]
-
 
 s3_client = boto3.client(
     's3',
@@ -47,7 +46,7 @@ def medir_ping(host="8.8.8.8"):
             ["ping", parametro, "1", host],
             capture_output=True,
             text=True,
-            timeout=5  
+            timeout=5
         )
 
         for linha in resultado.stdout.split("\n"):
@@ -60,23 +59,17 @@ def medir_ping(host="8.8.8.8"):
     except:
         return 0
     
-
-
-
 def listar_processos_filtrados():
     processos_filtrados = []
-
     for processo in psutil.process_iter(attrs=ATRIBUTOS_PROCESSOS):
         try:
             if processo.info['memory_percent'] >= 2.5:
                 processos_filtrados.append(processo.info)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-
     return processos_filtrados
 
 def coletar_metricas_sistema():
-    
     mac_numero = uuid.getnode()
     endereco_mac = ':'.join(
         ['{:02x}'.format((mac_numero >> i) & 0xff) for i in range(0, 48, 8)][::-1]
@@ -140,7 +133,6 @@ def coletar_metricas_sistema():
 
     data_hora_iso = datetime.now().isoformat()
 
-
     df_metricas = pd.DataFrame([{
         "endereco_mac": endereco_mac,
         "nome_usuario": nome_usuario,
@@ -188,9 +180,6 @@ def salvar_csv_local(df_metricas, nome_arquivo):
         mode = "a"
     )
    
-
-
-
 def upload_arquivo_s3(caminho_arquivo_local, bucket, idMaquina, object_name=None):
     if object_name is None:
         object_name = os.path.basename(caminho_arquivo_local)
@@ -225,7 +214,8 @@ def iniciar_captura():
     if (contador >= 60):
         contador = 0
         upload_arquivo_s3(bucket = "s3-raw-lab-202604061333-v2", idMaquina = id_maquina, caminho_arquivo_local = f"./{nome_arquivo}.csv")
-    
+        open(f"{nome_arquivo}.csv", "w").close()
+   
     dados = df_atual.iloc[0]
     limpar_terminal()
     exibir_terminal(dados)
