@@ -6,11 +6,14 @@ import os
 import boto3
 import logging
 from botocore.exceptions import ClientError
+import mysql.connector
+from mysql.connector import Error
 
 # ================= CONFIG ================= #
 INTERVALO = 5
 ARQUIVO_TRATADO = "dados_tratados.csv"
 BUCKET = "s3-raw-lab-202604061333"
+DIRETORIO = "/teste/"
 
 # ================= LOAD (S3) ================= #
 def upload_file(file_name, bucket, object_name=None):
@@ -19,10 +22,12 @@ def upload_file(file_name, bucket, object_name=None):
 
     s3_client = boto3.client(
         's3',
-        aws_access_key_id='x',
-        aws_secret_access_key='y',
-        aws_session_token='z'
+        aws_access_key_id=,
+        aws_secret_access_key=,
+        aws_session_token=
     )
+
+    resposta = s3_client.list_objects_v2(bucket = BUCKET, prefix = DIRETORIO)
 
     try:
         s3_client.upload_file(file_name, bucket, object_name)
@@ -34,75 +39,53 @@ def upload_file(file_name, bucket, object_name=None):
 
 # ================= EXTRACT ================= #
 def extract():
-    cpu = psutil.cpu_percent()
-    memoria = psutil.virtual_memory()
-    disco = psutil.disk_usage("/").percent
+    try:
+        conexao = mysql.connector.connect(
+        host='localhost',
+        database='systraintrack',
+        user='root',
+        password='@GOSTY0210will0511'
+        )
+        
+        if conexao.is_connected():
+            informacoes_bd = conexao.get_server_info()
+            print(f"Conecção com o MySQLServer, versão:  {informacoes_bd} realizada com sucesso!")
 
-    datahora = datetime.now()
+            cursor = conexao.cursor()
 
-    dados = {
-        "cpu": cpu,
-        "ram_usada": memoria.used,
-        "ram_total": memoria.total,
-        "disco": disco,
-        "datahora": datahora
-    }
+            query = ""
 
-    return dados
+            retorno = cursor.fetchall()
+            print(f"Total de linhas retornadas: {cursor.rowcount}")
+
+            for row in retorno:
+                print(row)
+            
+    except Error as e:
+        print(f"Erro ao conectar ao MySQL {e}")
+
+    finally:
+        if 'conexao' in locals() and conexao.is_connected():
+            cursor.close()
+            conexao.close()
+            print(f"Conxão encerrada")
+
+
+    if 'contents' in resposta:
+        for obj in resposta['Contents']:
+            print(obj['key'])
+    else:
+        print("O diretório está vazio ou não existe.")
+
+
+
 
 # ================= TRANSFORM ================= #
 
 def transform(dados):
     df = pd.DataFrame([dados])
 
-    df["ram_percentual"] = round((df["ram_usada"] / df["ram_total"]) * 100, 2)
-
-    def classificar_ram(ram_percentual):
-        if ram_percentual < 40:
-            return "BAIXO"
-        elif ram_percentual < 70:
-            return "MODERADO"
-        else:
-            return "ALTO"
-        
-    df["status_ram"] = df["ram_percentual"].apply(classificar_ram)
-        
-    def classificar_cpu(cpu):
-        if cpu < 50:
-            return "BAIXO"
-        elif cpu < 80:
-            return "MODERADO"
-        else:
-            return "ALTO"
-
-    df["status_cpu"] = df["cpu"].apply(classificar_cpu)
-
-    def classificar_disco(disco):
-        if disco < 40:
-            return "OK"
-        elif disco < 70:
-            return "ATENCAO"
-        else:
-            return "CRITICO"
-
-    df["status_disco"] = df["disco"].apply(classificar_disco)
-
-    df["hora"] = df["datahora"].dt.hour
-
-    def periodo(hora):
-        if hora < 12:
-            return "MANHA"
-        elif hora < 18:
-            return "TARDE"
-        else:
-            return "NOITE"
-
-    df["periodo"] = df["hora"].apply(periodo)
-
-    df = df.drop(columns=["ram_usada", "ram_total", "hora"])
-
-    return df
-
+    
 # ================= LOAD ================= #
 def load(df):
     if not os.path.exists(ARQUIVO_TRATADO):
