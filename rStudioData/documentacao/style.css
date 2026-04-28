@@ -1,0 +1,289 @@
+:root {
+  --page-width: 210mm;
+  --text: #1f2937;
+  --muted: #6b7280;
+  --border: #d1d5db;
+  --soft: #f3f4f6;
+  --accent: #1d4ed8;
+  --bg: #eef2f7;
+}
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1.6;
+}
+
+.document-shell {
+  max-width: calc(var(--page-width) + 80px);
+  margin: 32px auto;
+  padding: 0 24px 48px;
+}
+
+.page {
+  width: 100%;
+  max-width: var(--page-width);
+  margin: 0 auto 24px;
+  background: white;
+  padding: 24mm 20mm 22mm;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  border: 1px solid #e5e7eb;
+  position: relative;
+}
+
+.cover {
+  min-height: 270mm;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  font-size: 12px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight: 700;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: Arial, Helvetica, sans-serif;
+  color: #111827;
+  margin-top: 0;
+}
+
+h1 {
+  font-size: 34px;
+  line-height: 1.15;
+  margin-bottom: 12px;
+}
+
+h2 {
+  font-size: 24px;
+  border-bottom: 2px solid var(--soft);
+  padding-bottom: 8px;
+  margin-top: 28px;
+  margin-bottom: 14px;
+}
+
+h3 {
+  font-size: 18px;
+  margin-top: 22px;
+  margin-bottom: 8px;
+}
+
+p {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.subtitle {
+  font-size: 18px;
+  color: var(--muted);
+  margin-bottom: 20px;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 8px 16px;
+  margin-top: 24px;
+  max-width: 520px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 14px;
+}
+
+.meta-grid div:nth-child(odd) {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.toc {
+  padding-left: 20px;
+  margin: 0;
+}
+
+.toc li {
+  margin: 8px 0;
+}
+
+.toc a {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dotted transparent;
+}
+
+.toc a:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.callout {
+  border-left: 4px solid var(--accent);
+  background: #eff6ff;
+  padding: 12px 14px;
+  margin: 18px 0;
+  font-size: 14px;
+}
+
+.summary-box {
+  background: #fafafa;
+  border: 1px solid var(--border);
+  padding: 14px 16px;
+  margin: 18px 0 20px;
+  border-radius: 6px;
+}
+
+.section-number {
+  color: var(--accent);
+  margin-right: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0 22px;
+  font-size: 14px;
+}
+
+th,
+td {
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--soft);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.plot-block {
+  margin: 20px 0 26px;
+  border: 1px solid var(--border);
+  background: white;
+}
+
+.plot-frame {
+  width: 100%;
+  height: 520px;
+  border: 0;
+  display: block;
+  background: white;
+}
+
+.plot-caption {
+  border-top: 1px solid var(--border);
+  background: #fafafa;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: var(--muted);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.footer-note {
+  margin-top: 32px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.page-number::after {
+  content: counter(page);
+}
+
+ul,
+ol {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+code {
+  font-family: Consolas, Monaco, monospace;
+  background: #f3f4f6;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.95em;
+}
+
+pre {
+  overflow-x: auto;
+  background: #111827;
+  color: #f9fafb;
+  padding: 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 16px 0 20px;
+}
+
+@media screen and (max-width: 900px) {
+  .document-shell {
+    padding: 0 12px 24px;
+  }
+
+  .page {
+    padding: 18mm 12mm 18mm;
+  }
+
+  .two-col {
+    grid-template-columns: 1fr;
+  }
+
+  .plot-frame {
+    height: 420px;
+  }
+}
+
+@media print {
+  body {
+    background: white;
+  }
+
+  .document-shell {
+    margin: 0;
+    padding: 0;
+    max-width: none;
+  }
+
+  .page {
+    width: auto;
+    max-width: none;
+    margin: 0;
+    box-shadow: none;
+    border: none;
+    page-break-after: always;
+  }
+
+  .page:last-child {
+    page-break-after: auto;
+  }
+
+  @page {
+    size: A4;
+    margin: 18mm 14mm 18mm 14mm;
+  }
+}

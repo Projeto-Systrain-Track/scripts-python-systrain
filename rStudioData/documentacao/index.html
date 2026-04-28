@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Relatório: análise explorativa em R</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="document-shell">
+      <section class="page cover">
+        <div>
+          <div class="eyebrow">SysTrain-Track</div>
+          <h1>Relatório: análise explorativa em R</h1>
+          <p class="subtitle">
+            Elaboração técnica de métricas, métodos, transformações e visualizações disponiabilizádas na Dashboard
+          </p>
+
+          <div  style="display: flex; justify-content: center;">
+            <strong>
+              <br>
+              <br>
+              <br>
+              <br>
+
+                <img src="./assets/logo.svg" style="height: 23vh;"/> 
+
+            </strong> 
+            
+          </div>
+        </div>
+
+        <div class="meta-grid">
+          <div>Autora</div>
+          <div>Marci Hiromi Yogi Carvalho</div>
+          <div>Equipe</div>
+          <div>Grupo 1: <br>
+                        Erick Vieiro Martins;<br>
+                        Kauan Alessandro Kadooca Bastos;<br>
+                        Leticia de Azevedo Pinheiro;<br>
+                        Pedro Augusto Lemos Rodrigues;<br>
+                        Pedro Henrique de Oliveira 
+          </div>
+          <div>Data de conclusão:</div>
+          <div>17 / 04 / 2026</div>
+        </div>
+      </section>
+      <section class="page">
+        <h2><span class="section-number"> </span>Sumário</h2>
+        <ol class="toc">
+          <li><a href="#overview">Introdução</a></li>
+          <li><a href="#method">Método Utilizado</a></li>
+          <li><a href="#results">Resultados & Visualizações</a></li>
+        </ol>
+        </div>
+      </section>
+
+      <section class="page" id="overview">
+        <h2><span class="section-number"></span>Introdução</h2>
+
+        O seguinte documento elabora nas escolhas feitas em dados e métricas exibidos pelo sistema.<br>
+        Tais como: <br>
+                <u>Utilização de CPU</u><br>
+                <u>Consumo de memória RAM</u><br>
+                <u>Uso de armazenamento em disco</u><br>
+                <u>Disponibilidade de serviços monitorados</u><br>
+                <u>Ocorrência de falhas ou degradação de desempenho</u><br>
+
+        <img style="width: 100%;" src="../galeria/summary/cpu_tabela.png">
+        <img style="width: 100%;" src="../galeria/summary/memo_tabela.png">
+        <img style="width: 100%;" src="../galeria/summary/disco_tabela.png">
+        <img style="width: 100%;" src="../galeria/summary/swap_tabela.png">
+
+            
+      </section>
+
+      <section class="page" id="method">
+        <h2><span class="section-number"></span>Método Utilizado</h2>
+
+        <h3>RStudio:</h3>
+        <pre>
+<code style="color: black;">library(plotly)
+
+library(htmlwidgets)
+
+library(ggplot2)
+
+p <- ggplot(df, aes(x = data_hora)) + 
+        geom_line(aes(y = percentual_uso_cpu, color = "CPU")) + 
+        geom_line(aes(y = percentual_uso_ram, color = "RAM")) + 
+        geom_line(aes(y = percentual_uso_disco, color = "Disco")) + 
+        scale_color_manual(values = c("CPU" = "red", "RAM" = "blue", "Disco" = "green")) +
+        labs(title = "Uso de recursos ao longo do tempo", color = "Recurso")
+
+saveWidget(p, file = "plots/plot_uso_recursos.html", selfcontained = TRUE)
+</code></pre>
+
+      </section>
+
+
+
+
+      <section class="page" id="results">
+        <h2><span class="section-number"></span>Resultados & Visualizações</h2>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3> Quantidade de passageiros em milhar</h3>
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/comparacao_linhas_janeiro.html"></iframe>
+          <div class="plot-caption">
+            Figure 1. Gráfico de Linha ggplot, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          O valor foi calculado utilizando a média do consumo de CPU nos intervalos de uma <b>hora</b>, 
+          sendo exibida a média dessas <b>horas</b> nos <b>dias</b> monitorados.
+        </p>
+        <p>
+          Observa-se claros picos de atividade dentro das linhas analisadas durante dias
+          específicos da semana e mês. Com maior concentração durante dias úteis(segunda, terça, 
+          quarta, quinta, sexta) e dias afastados de feriados populares.
+        </p>
+        <!--  -->
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/cpu_media_por_hora.html"></iframe>
+          <div class="plot-caption">
+            Figure 2. Gráfico de Linha ggplot, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          Uso da CPU segue um padrão bem definido em relação ao horario do dia, 
+          Apesar de variações grandes entre diferentes dias e maquinas, todas seguem
+          o desvio por hora que conecta com os horários esperados com maior fluxo de 
+          carros e passageiros.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Anomalia: (%CPU Atual - Média Geral de %CPU) / Desvio padrão da %CPU</h3>
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/anomalia_cpu_ao_longo_do_tempo.html"></iframe>
+          <div class="plot-caption">
+            Figure 3. Gráfico de Linha ggplot, com pontos adicionados, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          O uso da CPU segue padrões esperados de consumo com tarefas na escala analisada, exceto durante
+          momentos curtos em dias com baixa atividade enquanto horas de funcionamento com menor atividade, 
+          nessas janelas a CPU se encontra sendo minimamente utilizada.
+        </p>
+        <h4>Conclusão</h4>
+        <p>
+            Métodos como esse auxiliam na detecção anomalias, degradação e/ou falhas nos componentes do servidor RBC.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Uso de recursos ao Longo do periodo analisado</h3>
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/Uso_de_recursos_ao_longo_do_tempo.html"></iframe>
+          <div class="plot-caption">
+            Figure 4. Gráficos de Linha ggplot, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          CPU e RAM seguiram o comportamento esperado, porem foi notado o acrescimo gradual de uso de disco interno,
+          isso se deve a diferentes processos que escrevem dados no disco, isso demonstra que, em tempo, sem ação devida
+          , os processos consumirão todo volume. Na simulação foi feito possivel um limitador integrado aos processos, mas na realidade
+          tais eventos são observados e reparados por membros operacionais.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Taxa de Escrita e Leitura do Disco</h3>
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/uso_Input_Output_do_disco.html"></iframe>
+          <div class="plot-caption">
+            Figure 5. Gráfico de Linha ggplot, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          Seguindo comportamento esperado, proporcional ao nûmero de processos ativos naquele momento.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Comparação de uso de RAM e SWAP</h3>
+        <div class="plot-block">
+          <iframe class="plot-frame" src="../galeria/comparacao_uso_ram_e_swap.html"></iframe>
+          <div class="plot-caption">
+            Figure 6. Gráfico de Linha ggplot, sendo exibido por meio do ggplotly() 
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          Seguindo comportamento esperado, proporcional ao nûmero de processos ativos naquele momento.
+        </p>
+        <h4>Conclusão</h4>
+        <p>
+            O percentual de uso de memoria SWAP disponivel deixa evidente a nessessidade de acrescimo de RAM,
+            fazendo seu monitoramento em relação a RAM de grande relevância.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Comparação da taxa de Download e Latência</h3>
+        <div class="plot-block">
+          <img class="plot-frame" src="../galeria/download_latencia_comp.png">
+          <div class="plot-caption">
+            Figure 7. Gráfico de Linha ggplot
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          Enquanto a taxa de Download varia, porem se contendo a um espaço claro e definido em maximos e minimos.
+          A latencia aparenta ser afetada por fatores externos, sem relação aos outros processos, mas afetando a execução deles, 
+          uma relação onde latencia afeta os processos, mas não o oposto.
+        </p>
+
+        <h4>Conclusão</h4>
+        <p>
+            Latência permite melhor estimativa e previsibilidade de problemas, o tempo de resposta, servidor carro, é essencial 
+            para o funcionamento do sistema de controle. O monitoramento dessas métricas permite maior controle e atenção a incidentes.
+        </p>
+        <!--  -->
+        <!--  -->
+        <!--  -->
+        <h3>Saude da maquina</h3>
+        <div class="plot-block">
+          <img class="plot-frame" src="../galeria/Saude_maquina.png">
+          <div class="plot-caption">
+            Figure 7. Gráfico de Linha ggplot
+          </div>
+        </div>
+        <h4>Interpretação</h4>
+        <p>
+          Seguindo comportamento esperado, proporcional ao nûmero de processos ativos naquele momento.
+        </p>
+        <h4>Conclusão</h4>
+        <p>
+            Métrica essencial em estimar Status de servidor RBC.
+        </p>
+
+      </section>
+  </body>
+</html>
