@@ -1,16 +1,17 @@
+from botocore.exceptions import ClientError
+from colorama import Fore, Style, init
+from dotenv import load_dotenv
 from datetime import datetime
 import pandas as pd
+import subprocess
+import logging
 import psutil
+import boto3
 import uuid
 import time
 import os
-from colorama import Fore, Style, init
-import subprocess
-import boto3
-import logging
-from botocore.exceptions import ClientError
 
-INTERVALO_SEGUNDOS = 1
+INTERVALO_SEGUNDOS = 60
 
 ATRIBUTOS_PROCESSOS = [
     'pid', 'name', 'username', 'status', 'create_time',
@@ -19,11 +20,17 @@ ATRIBUTOS_PROCESSOS = [
 ]
 
 
-s3_client = boto3.client(
-    's3',
-    aws_access_key_id='',
-    aws_secret_access_key='',
-    aws_session_token=''
+load_dotenv()
+
+NOME_BUCKET = os.getenv("S3_BUCKET_NAME")
+
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_DEFAULT_REGION"),
+    aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+    endpoint_url=os.getenv("S3_ENDPOINT_URL") or None #adivinha.
 )
 
 init(autoreset=True)
