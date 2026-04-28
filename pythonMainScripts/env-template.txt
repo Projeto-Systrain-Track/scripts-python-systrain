@@ -1,0 +1,10 @@
+AWS_ACCESS_KEY_ID=xxx
+AWS_SECRET_ACCESS_KEY=xxx
+AWS_DEFAULT_REGION=us-east-1
+AWS_SESSION_TOKEN=
+
+S3_BUCKET_NAME=your-bucket-name
+
+
+S3_INPUT_KEY=input/df.csv
+S3_OUTPUT_PREFIX=output/saida_processada
