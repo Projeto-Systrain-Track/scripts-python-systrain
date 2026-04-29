@@ -33,7 +33,7 @@ MYSQL_CONFIG = {
 
 PROCESS_GAP_MINUTES = 5
 
-OUTPUT_DIR = "saida_processada"
+OUTPUT_DIR = "trusted"
 
 
 
@@ -639,7 +639,7 @@ def main():
     dirs = ensure_output_dirs(OUTPUT_DIR)
 
     INPUT_S3_KEY = os.getenv("S3_INPUT_KEY", "df.csv")
-    OUTPUT_S3_PREFIX = os.getenv("S3_OUTPUT_PREFIX", "saida_processada")
+    OUTPUT_S3_PREFIX = os.getenv("S3_OUTPUT_PREFIX", "trusted")
 
     df = load_csv_from_s3(NOME_BUCKET, INPUT_S3_KEY)
 

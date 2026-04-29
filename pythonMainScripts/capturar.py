@@ -1,17 +1,19 @@
 from botocore.exceptions import ClientError
-from colorama import Fore, Style, init
+from colorama import Fore, init
+from typing import Dict
 from dotenv import load_dotenv
 from datetime import datetime
+from pathlib import Path
 import pandas as pd
 import subprocess
-import logging
 import psutil
 import boto3
 import uuid
 import time
 import os
 
-INTERVALO_SEGUNDOS = 60
+INTERVALO_SEGUNDOS = 3
+OUTPUT_DIR = "raw"
 
 ATRIBUTOS_PROCESSOS = [
     'pid', 'name', 'username', 'status', 'create_time',
@@ -19,8 +21,7 @@ ATRIBUTOS_PROCESSOS = [
     'cmdline', 'exe', 'cpu_times', 'memory_percent'
 ]
 
-
-load_dotenv()
+load_dotenv(dotenv_path=".env.dev")
 
 NOME_BUCKET = os.getenv("S3_BUCKET_NAME")
 
@@ -30,60 +31,71 @@ s3 = boto3.client(
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     region_name=os.getenv("AWS_DEFAULT_REGION"),
     aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
-    endpoint_url=os.getenv("S3_ENDPOINT_URL") or None #adivinha.
+    endpoint_url=os.getenv("S3_ENDPOINT_URL") or None
 )
 
 init(autoreset=True)
+
 
 def cor_status(valor, limite1=60, limite2=80):
     if valor >= limite2:
         return Fore.RED
     elif valor >= limite1:
         return Fore.YELLOW
-    else:
-        return Fore.GREEN
+    return Fore.GREEN
+
+
+def ensure_output_dirs(base_dir: str) -> Dict[str, Path]:
+    base = Path(base_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    return {"base": base}
 
 
 def limpar_terminal():
     os.system('cls' if os.name == 'nt' else 'clear')
 
 
-
 def medir_ping(host="8.8.8.8", timeout_segundos=4):
     try:
+        comando = ["ping", "-n", "1", host] if os.name == "nt" else ["ping", "-c", "1", host]
+
         resultado = subprocess.run(
-            ["ping", "-n", "1", host],
+            comando,
             capture_output=True,
             text=True,
-            timeout=timeout_segundos 
+            timeout=timeout_segundos
         )
-        
+
         for linha in resultado.stdout.splitlines():
-            if "tempo=" in linha.lower() or "time=" in linha.lower():
-                partes = linha.lower().split("tempo=") if "tempo=" in linha.lower() else linha.lower().split("time=")
-                tempo = partes[1].split("ms")[0].strip()
-                return int(tempo)
-        
+            linha_lower = linha.lower()
+
+            if "tempo=" in linha_lower:
+                tempo = linha_lower.split("tempo=")[1].split("ms")[0].strip()
+                return int(float(tempo.replace(",", ".")))
+
+            if "time=" in linha_lower:
+                tempo = linha_lower.split("time=")[1].split("ms")[0].strip()
+                return int(float(tempo.replace(",", ".")))
+
         return 0
-    except (subprocess.TimeoutExpired, Exception):
+
+    except Exception:
         return 0
 
 
+def get_all_processes():
+    process_list = []
 
-def listar_processos_filtrados():
-    processos_filtrados = []
-
-    for processo in psutil.process_iter(attrs=ATRIBUTOS_PROCESSOS):
+    for proc in psutil.process_iter(ATRIBUTOS_PROCESSOS):
         try:
-            if processo.info['memory_percent'] >= 5:
-                processos_filtrados.append(processo.info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            continue
+            process_list.append(proc.info)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
 
-    return processos_filtrados
+    return process_list
+
 
 def coletar_metricas_sistema():
-    
     mac_numero = uuid.getnode()
     endereco_mac = ':'.join(
         ['{:02x}'.format((mac_numero >> i) & 0xff) for i in range(0, 48, 8)][::-1]
@@ -93,7 +105,6 @@ def coletar_metricas_sistema():
         nome_usuario = os.getlogin()
     except Exception:
         nome_usuario = os.environ.get("USERNAME") or os.environ.get("USER") or "desconhecido"
-    
 
     percentual_uso_cpu = psutil.cpu_percent(interval=None)
     frequencia_cpu = psutil.cpu_freq()
@@ -122,7 +133,7 @@ def coletar_metricas_sistema():
     io_rede_final = psutil.net_io_counters()
 
     latencia_ping_ms = medir_ping()
-    
+
     taxa_leitura_disco_bytes_por_segundo = (
         io_disco_final.read_bytes - io_disco_inicial.read_bytes
     ) / INTERVALO_SEGUNDOS
@@ -139,10 +150,8 @@ def coletar_metricas_sistema():
         io_rede_final.bytes_sent - io_rede_inicial.bytes_sent
     ) / INTERVALO_SEGUNDOS
 
-    lista_processos = listar_processos_filtrados()
-    
+    lista_processos = get_all_processes()
     data_hora_iso = datetime.now().isoformat()
-
 
     df_metricas = pd.DataFrame([{
         "endereco_mac": endereco_mac,
@@ -179,34 +188,38 @@ def coletar_metricas_sistema():
         "processos": str(lista_processos),
         "data_hora_iso": data_hora_iso
     }])
-    
+
     return df_metricas
 
-def salvar_csv_local(df_metricas, nome_arquivo):
-    df_metricas.to_csv(
-        f'./{nome_arquivo}.csv',  
-        header=not os.path.exists(f'./{nome_arquivo}.csv'), 
-        index=False,
-        mode = "a"
+
+def salvar_csv_append(df_atual: pd.DataFrame, caminho_arquivo: Path):
+    caminho_arquivo.parent.mkdir(parents=True, exist_ok=True)
+
+    arquivo_existe = caminho_arquivo.exists()
+
+    df_atual.to_csv(
+        caminho_arquivo,
+        mode="a",
+        header=not arquivo_existe,
+        index=False
     )
-   
 
 
+def upload_directory_to_s3(local_dir: str, bucket: str, s3_prefix: str):
+    local_path = Path(local_dir)
 
-def upload_arquivo_s3(caminho_arquivo_local, bucket, idMaquina, object_name=None):
-    if object_name is None:
-        object_name = os.path.basename(caminho_arquivo_local)
+    for file_path in local_path.rglob("*"):
+        if file_path.is_file():
+            relative_path = file_path.relative_to(local_path)
+            s3_key = f"{s3_prefix}/{relative_path}".replace("\\", "/")
 
-    ano = datetime.now().strftime("%Y")
-    mes = datetime.now().strftime("%m")
-    dia = datetime.now().strftime("%d")
-    timestamp = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    try:
-        response = s3_client.upload_file(caminho_arquivo_local, bucket, f'raw/{ano}/{mes}/{dia}/dados_{timestamp}_{idMaquina}.csv')
-    except ClientError as e:
-        logging.error(e)
-        return False
-    return True
+            s3.upload_file(
+                Filename=str(file_path),
+                Bucket=bucket,
+                Key=s3_key
+            )
+
+            print(f"Uploaded: s3://{bucket}/{s3_key}")
 
 
 print(Fore.GREEN + "==========================================")
@@ -214,21 +227,38 @@ print(Fore.GREEN + "🚀 SYS TRAIN TRACK - MONITORAMENTO")
 print(Fore.GREEN + "==========================================\n")
 
 contador = 0
+
+
 def iniciar_captura():
     global contador
-    
-    df_atual = coletar_metricas_sistema()
-    id_maquina = df_atual["endereco_mac"].iloc[0].replace(":", "")
-    nome_arquivo = f'dados_{id_maquina}'
 
-    salvar_csv_local(df_atual, nome_arquivo)
-    contador +=  1
-        
-    if (contador >= 60):
+    dirs = ensure_output_dirs(OUTPUT_DIR)
+
+    nome_arquivo_csv = os.getenv("S3_INPUT_KEY", "df.csv")
+    output_s3_prefix = os.getenv("S3_OUTPUT_PREFIX", "raw")
+
+    # Prevent raw/raw/df.csv
+    nome_arquivo_csv = Path(nome_arquivo_csv).name
+
+    caminho_csv = dirs["base"] / nome_arquivo_csv
+
+    df_atual = coletar_metricas_sistema()
+
+    salvar_csv_append(df_atual, caminho_csv)
+
+    contador += 1
+
+    if contador >= 5:
         contador = 0
-        upload_arquivo_s3(bucket = "s3-raw-lab-202604061333-v2", idMaquina = id_maquina, caminho_arquivo_local = f"./{nome_arquivo}.csv")
-    
+
+        upload_directory_to_s3(
+            local_dir=OUTPUT_DIR,
+            bucket=NOME_BUCKET,
+            s3_prefix=output_s3_prefix
+        )
+
     dados = df_atual.iloc[0]
+
     limpar_terminal()
 
     print(Fore.GREEN + "==========================================")
@@ -250,11 +280,11 @@ def iniciar_captura():
 
     print(Fore.WHITE + "💾 RAM")
     print(cor_status(ram) + f"   Uso: {ram:.1f}%")
-    print(Fore.WHITE + f"   Livre: {dados['memoria_disponivel_bytes'] // (1024**3)} GB\n")
+    print(Fore.WHITE + f"   Livre: {dados['memoria_disponivel_bytes'] // (1024 ** 3)} GB\n")
 
     print(Fore.WHITE + "🗄 DISCO")
     print(cor_status(disco) + f"   Uso: {disco:.1f}%")
-    print(Fore.WHITE + f"   Livre: {dados['disco_livre_bytes'] // (1024**3)} GB\n")
+    print(Fore.WHITE + f"   Livre: {dados['disco_livre_bytes'] // (1024 ** 3)} GB\n")
 
     print(Fore.WHITE + "🌐 REDE")
     print(Fore.CYAN + f"   Ping: {ping} ms")
@@ -262,10 +292,13 @@ def iniciar_captura():
     print(Fore.MAGENTA + f"   ↑ {dados['taxa_upload_rede_bytes_por_segundo']} B/s\n")
 
     print(Fore.WHITE + "⚙ PROCESSOS")
-    # print(Fore.YELLOW + f"   Processos críticos: {len(eval(dados['processos']))}\n")
+    print(f"CONTADOR: {contador}")
+    print(f"CSV LOCAL: {caminho_csv}")
+    print(f"OUTPUT DIR: {OUTPUT_DIR}")
+    print(f"OUTPUT S3 PREFIX: {output_s3_prefix}")
+    print(f"NOME BUCKET: {NOME_BUCKET}")
     print(Fore.GREEN + "==========================================")
 
-    
 
 while True:
     iniciar_captura()
