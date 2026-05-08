@@ -10,78 +10,59 @@ import json
 import ast
 import os
 load_dotenv()
-def lerVariavelAmbienteBooleana(nomeVariavel: str, valorPadrao: bool = False) -> bool:
+def lerVariavelAmbienteBooleana(nomeVariavel: str) -> bool:
     """
     Lê uma variável do .env
     serei honesta, essa parte pode ser removida, mas não confio,
     logo, adicionei erros de digitação para que de certo mesmo assim...
     """
+
     valorBruto = os.getenv(nomeVariavel)
-    if valorBruto is None:
-        return valorPadrao
     valorNormalizado = valorBruto.strip().lower()
     if valorNormalizado in {"1", "true", "yes", "sim", "on","sin", "sum", "om", "treu", "tru", "TRUE", "True", "FUNCIONA", "s"}:
         return True
     if valorNormalizado in {"0", "false", "no", "nao", "não", "off", "noa", "n", "não funciona", "NÃO FUNCIONA", "flase", "fales"}:
         return False
-    return valorPadrao
-def lerVariavelAmbienteInteira(nomeVariavel: str, valorPadrao: int) -> int:
+    
+def lerVariavelAmbienteInteira(nomeVariavel: str) -> int:
     """
     Lê número inteiro do .env e evita que a ETL quebre
     """
-    try:
-        return int(os.getenv(nomeVariavel, str(valorPadrao)))
-    except ValueError:
-        return valorPadrao
-def lerVariavelAmbienteDecimal(nomeVariavel: str, valorPadrao: float) -> float:
+    return int(os.getenv(nomeVariavel))
+
+
+def lerVariavelAmbienteDecimal(nomeVariavel: str) -> float:
     """
     Lê número decimal do .env e usa o padrão quando não conseguir 
     """
-    try:
-        return float(os.getenv(nomeVariavel, str(valorPadrao)))
-    except ValueError:
-        return valorPadrao
-diretorioSaida = "trusted"
-jsonSaidaPadrao = "client/empresas_linhas_rbc.json"
-csvSaidaPadrao = "trusted/maquinas_enriquecido_status.csv"
+    return float(os.getenv(nomeVariavel))
+
 configuracaoMysql = {
-    "host": os.getenv("MYSQL_HOST", "localhost"),
-    "port": int(os.getenv("MYSQL_PORT", "3306")),
-    "user": os.getenv("MYSQL_USER", "root"),
-    "password": os.getenv("MYSQL_PASSWORD", "0623"),
-    "database": os.getenv("MYSQL_DATABASE", "systraintrack"),
+    "host": os.getenv("MYSQL_HOST"),
+    "port": int(os.getenv("MYSQL_PORT")),
+    "user": os.getenv("MYSQL_USER"),
+    "password": os.getenv("MYSQL_PASSWORD"),
+    "database": os.getenv("MYSQL_DATABASE"),
 }
-limiteAlertaCpuProcesso = float(os.getenv("PROCESS_CPU_ALERT", "20"))
-limiteAlertaPercentualMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_PERCENT_ALERT", "2"))
-limiteAlertaMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_MB_ALERT", "300"))
-limiteAlertaThreadsProcesso = int(os.getenv("PROCESS_THREADS_ALERT", "150"))
-limiteMaximoProcessosPorLeitura = int(os.getenv(
-    "PROCESS_MAX_PER_READING",
-    os.getenv("MAX_PROCESSES_PER_READING", "10")
-))
-limiteMinutosRbcOffline = float(os.getenv("RBC_OFFLINE_GAP_MINUTES", "5"))
-csvCompactoPadrao = os.getenv("COMPACT_CSV_DEFAULT", "1").strip().lower() not in {"0", "false", "no"}
-indentacaoJsonPadrao = os.getenv("JSON_INDENT", "0").strip()
-linhas = int(os.getenv("LINHAS", "10"))
-prefixosProcessosAltaPrioridade = tuple(
-    elemento.strip().lower()
-    for elemento in os.getenv("HIGH_PRIORITY_PROCESS_PREFIXES", "RBC_").split(",")
-    if elemento.strip()
-)
-limiteAlertaCpuProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_CPU_ALERT", "5"))
-limiteAlertaPercentualMemoriaProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_MEMORY_PERCENT_ALERT", "0.5"))
-limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_RSS_MB_ALERT", "20"))
-limitePicoCpuProcesso = float(os.getenv("PROCESS_CPU_SPIKE_ALERT", "15"))
-limitePicoMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_SPIKE_ALERT", "1"))
-limiteCrescimentoMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_GROWTH_MB_ALERT", "10"))
-palavrasChaveProcessosImportantes = tuple(
-    elemento.strip().lower()
-    for elemento in os.getenv(
-        "IMPORTANT_PROCESS_KEYWORDS",
-        "java,node,python,postgres,mysql,sqlserver,mongodb,redis,nginx,apache,httpd,docker,containerd,chrome,firefox,edge,chromium",
-    ).split(",")
-    if elemento.strip()
-)
+limiteAlertaCpuProcesso = float(os.getenv("PROCESS_CPU_ALERT"))
+limiteAlertaPercentualMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_PERCENT_ALERT"))
+limiteAlertaMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_MB_ALERT"))
+limiteAlertaThreadsProcesso = int(os.getenv("PROCESS_THREADS_ALERT"))
+limiteMaximoProcessosPorLeitura = int(os.getenv("PROCESS_MAX_PER_READING", os.getenv("MAX_PROCESSES_PER_READING")))
+limiteMinutosRbcOffline = float(os.getenv("RBC_OFFLINE_GAP_MINUTES"))
+csvCompactoPadrao = os.getenv("COMPACT_CSV_DEFAULT").strip().lower()
+indentacaoJsonPadrao = os.getenv("JSON_INDENT").strip()
+linhas = int(os.getenv("LAST_N"))
+prefixosProcessosAltaPrioridade = tuple(elemento.strip().lower() for elemento in os.getenv("HIGH_PRIORITY_PROCESS_PREFIXES").split(",")if elemento.strip())
+limiteAlertaCpuProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_CPU_ALERT"))
+limiteAlertaPercentualMemoriaProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_MEMORY_PERCENT_ALERT"))
+limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_RSS_MB_ALERT"))
+limitePicoCpuProcesso = float(os.getenv("PROCESS_CPU_SPIKE_ALERT"))
+limitePicoMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_SPIKE_ALERT"))
+limiteCrescimentoMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_GROWTH_MB_ALERT"))
+palavrasChaveProcessosImportantes = tuple(elemento.strip().lower()for elemento in os.getenv("IMPORTANT_PROCESS_KEYWORDS").split(","))
+
+
 def transformarParaDict(**argumentosNomeados):
     """
     Junta os argumentos nomeados em um dicionário.
@@ -1086,22 +1067,19 @@ def main():
     Roda o ETL completo usando apenas as configurações do .env.
     """
     caminhoCsvEntrada = os.getenv("LOCAL_INPUT_CSV", "df.csv")
-    caminhoJsonSaida = os.getenv("LOCAL_OUTPUT_JSON", jsonSaidaPadrao)
-    caminhoCsvSaidaConfigurado = os.getenv("LOCAL_OUTPUT_CSV", csvSaidaPadrao)
+    caminhoJsonSaida = os.getenv("LOCAL_OUTPUT_JSON")
+    caminhoCsvSaidaConfigurado = os.getenv("LOCAL_OUTPUT_CSV")
     diretorioJsonClient = os.getenv("CLIENT_OUTPUT_DIR", "client")
-    diretorioSaidaProcessos = os.getenv("PROCESS_OUTPUT_DIR", f"{diretorioJsonClient}/processos")
-    quantidadeUltimasLeituras = lerVariavelAmbienteInteira("LAST_N", 1)
-    quantidadeUltimasLeiturasProcessos = lerVariavelAmbienteInteira(
-        "PROCESS_LAST_N",
-        max(quantidadeUltimasLeituras * 10, quantidadeUltimasLeituras),
-    )
-    limiteMinutosSemLeitura = lerVariavelAmbienteDecimal("RBC_OFFLINE_GAP_MINUTES", limiteMinutosRbcOffline)
-    usarBancoDados = not lerVariavelAmbienteBooleana("NO_DB", False)
-    pularAlertasProcessos = lerVariavelAmbienteBooleana("SKIP_PROCESS_ALERTS", False)
-    gravarCsvCompleto = lerVariavelAmbienteBooleana("FULL_CSV", False)
-    compactarCsvComGzip = lerVariavelAmbienteBooleana("CSV_GZIP", False)
-    indentacaoJson = lerVariavelAmbienteInteira("JSON_INDENT", int(indentacaoJsonPadrao or 0))
-    usarCsvCompacto = False if gravarCsvCompleto else lerVariavelAmbienteBooleana("COMPACT_CSV_DEFAULT", csvCompactoPadrao)
+    diretorioSaidaProcessos = os.getenv("PROCESS_OUTPUT_DIR")
+    quantidadeUltimasLeituras = lerVariavelAmbienteInteira("LAST_N")
+    quantidadeUltimasLeiturasProcessos = lerVariavelAmbienteInteira("PROCESS_LAST_N")
+    limiteMinutosSemLeitura = lerVariavelAmbienteDecimal("RBC_OFFLINE_GAP_MINUTES")
+    usarBancoDados = not lerVariavelAmbienteBooleana("NO_DB")
+    pularAlertasProcessos = lerVariavelAmbienteBooleana("SKIP_PROCESS_ALERTS")
+    gravarCsvCompleto = lerVariavelAmbienteBooleana("FULL_CSV")
+    compactarCsvComGzip = lerVariavelAmbienteBooleana("CSV_GZIP")
+    indentacaoJson = lerVariavelAmbienteInteira("JSON_INDENT")
+    usarCsvCompacto = False if gravarCsvCompleto else lerVariavelAmbienteBooleana("COMPACT_CSV_DEFAULT")
     tabelaDados = carregarTodosCsvLocais(    caminhoCsvEntrada,    analisarColunaProcessos = not pularAlertasProcessos)
     enderecosMacUnicos = sorted(tabelaDados["endereco_mac"].dropna().unique().tolist())
     if usarBancoDados:
