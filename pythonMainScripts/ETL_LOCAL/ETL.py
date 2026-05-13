@@ -10,6 +10,10 @@ import json
 import ast
 import os
 load_dotenv()
+try:
+    columns = os.get_terminal_size().columns
+except OSError:
+    columns = 80
 def lerVariavelAmbienteBooleana(nomeVariavel: str) -> bool:
     """
     Lê uma variável do .env
@@ -256,14 +260,19 @@ def buscarProcessoPorTexto(processo: dict) -> str:
     else:
         textoLinhaComando = str(linhaComando or "").lower()
     return f"{nomeProcesso} {executavelProcesso} {textoLinhaComando}".strip()
-def processoPossuiPrioridade(processo: dict) -> bool:
+def processoPossuiPrioridade(processo: dict, limitesComponentes: Optional[dict] = None) -> bool:
     """
     Confere se o processo merece atenção especial.
-    Usa os prefixos configurados no ambiente e procura tanto no nome quanto no texto geral do processo. Se bater, ele entra na fila dos importantes.
+    Primeiro usa o PRS_STX do banco. Se não tiver, usa HIGH_PRIORITY_PROCESS_PREFIXES do .env.
     """
     textoProcesso = buscarProcessoPorTexto(processo)
     nomeProcesso = str(processo.get("name") or "").lower()
-    return any(nomeProcesso.startswith(prefixo) or prefixo in textoProcesso for prefixo in prefixosProcessosAltaPrioridade)
+    prefixoBanco = pegarValorComponenteTexto(limitesComponentes, "PRS_STX")
+    if prefixoBanco:
+        prefixos = tuple(elemento.strip().lower() for elemento in str(prefixoBanco).split(",") if elemento.strip())
+    else:
+        prefixos = prefixosProcessosAltaPrioridade
+    return any(nomeProcesso.startswith(prefixo) or prefixo in textoProcesso for prefixo in prefixos)
 def valoresNumericosDosProcessos(processo: dict) -> dict:
     """
     Puxa os números que realmente importam para avaliar o processo.
@@ -295,17 +304,43 @@ def identificarProcesso(processo: dict) -> str:
     if identificadorProcesso is not None and horarioCriacaoProcesso is not None:
         return f"pid:{identificadorProcesso}|created:{horarioCriacaoProcesso}|name:{nomeProcesso}"
     return f"name:{nomeProcesso}|exe:{executavelProcesso}|cmd:{textoLinhaComando[:180]}"
-def motivosAlertasDosProcessos(processo: dict, valoresAnteriores: Optional[dict] = None) -> List[str]:
+def motivosAlertasDosProcessos(processo: dict, valoresAnteriores: Optional[dict] = None, limitesComponentes: Optional[dict] = None) -> List[str]:
     """
     Monta a lista de motivos pelos quais um processo virou alerta.
-    Processo prioritário tem limite mais baixo, porque a gente quer pegar problema nele mais cedo. Se tiver leitura anterior, também olha crescimento estranho
+    Usa limites do banco para PRS_CPU_PER, PRS_RAM_PER, PRS_RAM_USE, PRS_CPU_THR e PRS_STX.
+    Se o banco não tiver o limite, usa o .env como fallback.
     """
     valoresProcesso = valoresNumericosDosProcessos(processo)
     textoPesquisavelProcesso = buscarProcessoPorTexto(processo)
-    processoAltaPrioridade = processoPossuiPrioridade(processo)
-    limiteCpuAtual = limiteAlertaCpuProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaCpuProcesso
-    limiteMemoriaAtual = limiteAlertaPercentualMemoriaProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaPercentualMemoriaProcesso
-    limiteMemoriaResidenteAtual = limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaMemoriaResidenteMbProcesso
+    processoAltaPrioridade = processoPossuiPrioridade(processo, limitesComponentes=limitesComponentes)
+    limiteCpuAtual = pegarLimiteComponente(
+        limitesComponentes,
+        "PRS_CPU_PER",
+        "limite_alerta",
+        limiteAlertaCpuProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaCpuProcesso,
+    )
+    limiteMemoriaAtual = pegarLimiteComponente(
+        limitesComponentes,
+        "PRS_RAM_PER",
+        "limite_alerta",
+        limiteAlertaPercentualMemoriaProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaPercentualMemoriaProcesso,
+    )
+    limiteMemoriaResidenteAtual = pegarLimiteComponente(
+        limitesComponentes,
+        "PRS_RAM_USE",
+        "limite_alerta",
+        limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaMemoriaResidenteMbProcesso,
+    )
+    limiteThreadsAtual = pegarLimiteComponente(
+        limitesComponentes,
+        "PRS_CPU_THR",
+        "limite_alerta",
+        limiteAlertaThreadsProcesso,
+    )
+    limiteCpuAtual = float(limiteCpuAtual)
+    limiteMemoriaAtual = float(limiteMemoriaAtual)
+    limiteMemoriaResidenteAtual = float(limiteMemoriaResidenteAtual)
+    limiteThreadsAtual = float(limiteThreadsAtual)
     motivosAlerta = []
     if processoAltaPrioridade:
         motivosAlerta.append("processo_rbc_alta_prioridade")
@@ -315,8 +350,8 @@ def motivosAlertasDosProcessos(processo: dict, valoresAnteriores: Optional[dict]
         motivosAlerta.append(f"memory_percent >= {limiteMemoriaAtual:g}")
     if valoresProcesso["rss_mb"] >= limiteMemoriaResidenteAtual:
         motivosAlerta.append(f"rss_mb >= {limiteMemoriaResidenteAtual:g}")
-    if valoresProcesso["num_threads"] >= limiteAlertaThreadsProcesso:
-        motivosAlerta.append(f"num_threads >= {limiteAlertaThreadsProcesso:g}")
+    if valoresProcesso["num_threads"] >= limiteThreadsAtual:
+        motivosAlerta.append(f"num_threads >= {limiteThreadsAtual:g}")
     if valoresAnteriores:
         variacaoCpu = valoresProcesso["cpu_percent"] - float(valoresAnteriores.get("cpu_percent") or 0)
         variacaoMemoria = valoresProcesso["memory_percent"] - float(valoresAnteriores.get("memory_percent") or 0)
@@ -330,18 +365,17 @@ def motivosAlertasDosProcessos(processo: dict, valoresAnteriores: Optional[dict]
             motivosAlerta.append(f"anomalia_rss_growth_mb >= {limiteCrescimentoMemoriaResidenteMbProcesso * multiplicadorPico:g}")
     if any(palavraChave in textoPesquisavelProcesso for palavraChave in palavrasChaveProcessosImportantes):
         if (
-            valoresProcesso["cpu_percent"] >= limiteAlertaCpuProcesso / 2
-            or valoresProcesso["memory_percent"] >= limiteAlertaPercentualMemoriaProcesso / 2
-            or valoresProcesso["rss_mb"] >= limiteAlertaMemoriaResidenteMbProcesso / 2
+            valoresProcesso["cpu_percent"] >= limiteCpuAtual / 2
+            or valoresProcesso["memory_percent"] >= limiteMemoriaAtual / 2
+            or valoresProcesso["rss_mb"] >= limiteMemoriaResidenteAtual / 2
         ):
             motivosAlerta.append("processo_importante_com_consumo_relevante")
     if processoAltaPrioridade and motivosAlerta == ["processo_rbc_alta_prioridade"]:
         return []
     return motivosAlerta
-def alertaProcessosCarga(processo: dict, motivosAlerta: List[str], valoresAnteriores: Optional[dict] = None) -> dict:
+def alertaProcessosCarga(processo: dict, motivosAlerta: List[str], valoresAnteriores: Optional[dict] = None, limitesComponentes: Optional[dict] = None) -> dict:
     """
-    Monta o alerta do processo.
-    Vai junto métrica, motivo, anomalia e algumas informações extras para facilitar a investigação depois.
+    Monta o alerta do processo usando limites do banco quando disponíveis.
     """
     informacoesMemoria = processo.get("memory_info") or {}
     temposCpu = processo.get("cpu_times") or {}
@@ -351,22 +385,28 @@ def alertaProcessosCarga(processo: dict, motivosAlerta: List[str], valoresAnteri
     variacaoCpu = valoresProcesso["cpu_percent"] - float(valoresAnteriores.get("cpu_percent") or 0) if valoresAnteriores else None
     variacaoMemoria = valoresProcesso["memory_percent"] - float(valoresAnteriores.get("memory_percent") or 0) if valoresAnteriores else None
     variacaoMemoriaResidente = valoresProcesso["rss_mb"] - float(valoresAnteriores.get("rss_mb") or 0) if valoresAnteriores else None
+    processoAltaPrioridade = processoPossuiPrioridade(processo, limitesComponentes=limitesComponentes)
+    limiteCpuAtual = float(pegarLimiteComponente(limitesComponentes, "PRS_CPU_PER", "limite_alerta", limiteAlertaCpuProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaCpuProcesso))
+    limiteMemoriaAtual = float(pegarLimiteComponente(limitesComponentes, "PRS_RAM_PER", "limite_alerta", limiteAlertaPercentualMemoriaProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaPercentualMemoriaProcesso))
+    limiteMemoriaResidenteAtual = float(pegarLimiteComponente(limitesComponentes, "PRS_RAM_USE", "limite_alerta", limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade if processoAltaPrioridade else limiteAlertaMemoriaResidenteMbProcesso))
+    limiteThreadsAtual = float(pegarLimiteComponente(limitesComponentes, "PRS_CPU_THR", "limite_alerta", limiteAlertaThreadsProcesso))
     pontuacaoAnomalia = 0.0
-    pontuacaoAnomalia += max(valoresProcesso["cpu_percent"] / max(limiteAlertaCpuProcesso, 1), 0)
-    pontuacaoAnomalia += max(valoresProcesso["memory_percent"] / max(limiteAlertaPercentualMemoriaProcesso, 0.1), 0)
-    pontuacaoAnomalia += max(valoresProcesso["rss_mb"] / max(limiteAlertaMemoriaResidenteMbProcesso, 1), 0)
+    pontuacaoAnomalia += max(valoresProcesso["cpu_percent"] / max(limiteCpuAtual, 1), 0)
+    pontuacaoAnomalia += max(valoresProcesso["memory_percent"] / max(limiteMemoriaAtual, 0.1), 0)
+    pontuacaoAnomalia += max(valoresProcesso["rss_mb"] / max(limiteMemoriaResidenteAtual, 1), 0)
+    pontuacaoAnomalia += max(valoresProcesso["num_threads"] / max(limiteThreadsAtual, 1), 0)
     if variacaoCpu is not None:
         pontuacaoAnomalia += max(variacaoCpu / max(limitePicoCpuProcesso, 1), 0) * 2
     if variacaoMemoria is not None:
         pontuacaoAnomalia += max(variacaoMemoria / max(limitePicoMemoriaProcesso, 0.1), 0) * 2
     if variacaoMemoriaResidente is not None:
         pontuacaoAnomalia += max(variacaoMemoriaResidente / max(limiteCrescimentoMemoriaResidenteMbProcesso, 1), 0) * 2
-    if processoPossuiPrioridade(processo):
+    if processoAltaPrioridade:
         pontuacaoAnomalia *= 2
     return {
         "pid": consertadorDeValoresBizarrosDoNumpy(processo.get("pid")),
         "name": consertadorDeValoresBizarrosDoNumpy(processo.get("name")),
-        "alta_prioridade": processoPossuiPrioridade(processo),
+        "alta_prioridade": processoAltaPrioridade,
         "username": consertadorDeValoresBizarrosDoNumpy(processo.get("username")),
         "status": consertadorDeValoresBizarrosDoNumpy(processo.get("status")),
         "cpu_percent": consertadorDeValoresBizarrosDoNumpy(processo.get("cpu_percent")),
@@ -384,6 +424,13 @@ def alertaProcessosCarga(processo: dict, motivosAlerta: List[str], valoresAnteri
         "cpu_times": {
             "user": consertadorDeValoresBizarrosDoNumpy(temposCpu.get("user")),
             "system": consertadorDeValoresBizarrosDoNumpy(temposCpu.get("system")),
+        },
+        "limites_usados": {
+            "PRS_CPU_PER": limiteCpuAtual,
+            "PRS_RAM_PER": limiteMemoriaAtual,
+            "PRS_RAM_USE": limiteMemoriaResidenteAtual,
+            "PRS_CPU_THR": limiteThreadsAtual,
+            "PRS_STX": pegarValorComponenteTexto(limitesComponentes, "PRS_STX", prefixosProcessosAltaPrioridade),
         },
         "anomalias": {
             "cpu_delta_desde_leitura_anterior": round(variacaoCpu, 4) if variacaoCpu is not None else None,
@@ -414,18 +461,18 @@ def chaveOrdenacaoLinhaJson(elemento: dict) -> str:
 def chaveOrdenacaoEmpresaJson(elemento: dict) -> str:
     """Ordena empresa pelo id ou pelo nome sem precisar usar lambda."""
     return str(elemento.get("id_empresa") or elemento.get("nome_empresa") or "")
-def processosUteis(processos: List[dict]) -> List[dict]:
+def processosUteis(processos: List[dict], limitesComponentes: Optional[dict] = None) -> List[dict]:
     """
     Escolhe processos interessantes quando não tem histórico para comparar.
-    É o plano reserva: sem contexto temporal, pelo menos tentamos mostrar o que parece importante ou consumindo recurso demais.
+    Também usa limites de processo do banco quando eles estiverem disponíveis.
     """
     processosSelecionados = []
     for processo in processos:
         if not isinstance(processo, dict):
             continue
-        motivosAlerta = motivosAlertasDosProcessos(processo)
+        motivosAlerta = motivosAlertasDosProcessos(processo, limitesComponentes=limitesComponentes)
         if motivosAlerta:
-            processosSelecionados.append(alertaProcessosCarga(processo, motivosAlerta))
+            processosSelecionados.append(alertaProcessosCarga(processo, motivosAlerta, limitesComponentes=limitesComponentes))
     processosSelecionados.sort(
         key=chaveOrdenacaoProcessoAlerta,
         reverse=True,
@@ -434,6 +481,7 @@ def processosUteis(processos: List[dict]) -> List[dict]:
 def criarColunaAlertaProcessos(tabelaDados: pd.DataFrame) -> pd.DataFrame:
     """
     Cria a coluna com os processos em alerta para cada leitura.
+    Usa limites vindos do banco por RBC e faz fallback para o .env.
     """
     if tabelaDados.empty:
         resultado = tabelaDados.copy()
@@ -441,11 +489,14 @@ def criarColunaAlertaProcessos(tabelaDados: pd.DataFrame) -> pd.DataFrame:
         return resultado
     resultado = tabelaDados.copy()
     resultado["data_hora_iso"] = pd.to_datetime(resultado["data_hora_iso"], errors="coerce")
+    if "limites_componentes" not in resultado.columns:
+        resultado["limites_componentes"] = [{} for _ in range(len(resultado))]
     colunaAgrupamento = "id_rbc" if "id_rbc" in resultado.columns else "endereco_mac"
     alertasPorIndice: Dict[Any, List[dict]] = {indice: [] for indice in resultado.index}
     valoresAnterioresPorChave: Dict[tuple, dict] = {}
     for indice, linhaDados in resultado.sort_values([colunaAgrupamento, "data_hora_iso"]).iterrows():
         chaveRbc = linhaDados.get(colunaAgrupamento)
+        limitesComponentes = linhaDados.get("limites_componentes") or {}
         alertasDaLinha = []
         for processo in linhaDados.get("processos_parsed", []) or []:
             if not isinstance(processo, dict):
@@ -453,9 +504,20 @@ def criarColunaAlertaProcessos(tabelaDados: pd.DataFrame) -> pd.DataFrame:
             identidadeProcesso = identificarProcesso(processo)
             chaveEstadoProcesso = (chaveRbc, identidadeProcesso)
             valoresAnteriores = valoresAnterioresPorChave.get(chaveEstadoProcesso)
-            motivosAlerta = motivosAlertasDosProcessos(processo, valoresAnteriores=valoresAnteriores)
+            motivosAlerta = motivosAlertasDosProcessos(
+                processo,
+                valoresAnteriores=valoresAnteriores,
+                limitesComponentes=limitesComponentes,
+            )
             if motivosAlerta:
-                alertasDaLinha.append(alertaProcessosCarga(processo, motivosAlerta, valoresAnteriores=valoresAnteriores))
+                alertasDaLinha.append(
+                    alertaProcessosCarga(
+                        processo,
+                        motivosAlerta,
+                        valoresAnteriores=valoresAnteriores,
+                        limitesComponentes=limitesComponentes,
+                    )
+                )
             valoresAnterioresPorChave[chaveEstadoProcesso] = valoresNumericosDosProcessos(processo)
         alertasDaLinha.sort(
             key=chaveOrdenacaoProcessoAlerta,
@@ -493,9 +555,10 @@ def carregarCsvLocal(caminhoCsv: str, separarColunaProcessos: bool = True, colun
     tabelaDados["data_hora_iso"] = pd.to_datetime(tabelaDados["data_hora_iso"], errors="coerce")
     colunasNumericas = [
         "percentual_uso_cpu", "memoria_total_bytes", "memoria_disponivel_bytes",
-        "percentual_uso_ram", "swap_usado_bytes", "swap_livre_bytes",
+        "percentual_uso_ram", "swap_total_bytes", "swap_usado_bytes", "swap_livre_bytes",
         "swap_entrada_bytes", "swap_saida_bytes", "percentual_uso_swap",
-        "disco_livre_bytes", "percentual_uso_disco",
+        "disco_total_bytes", "disco_usado_bytes", "disco_livre_bytes", "percentual_uso_disco",
+        "frequencia_cpu_atual_mhz", "frequencia_cpu_minima_mhz", "frequencia_cpu_maxima_mhz",
         "taxa_leitura_disco_bytes_por_segundo", "taxa_escrita_disco_bytes_por_segundo",
         "latencia_ping_ms", "taxa_download_rede_bytes_por_segundo",
         "taxa_upload_rede_bytes_por_segundo",
@@ -521,6 +584,241 @@ def obterConexaoMysql():
     if mysql is None:
         raise RuntimeError("mysql-connector-python não está instalado")
     return mysql.connector.connect(**configuracaoMysql)
+
+
+def separarDefinicaoComponente(definicao: Any) -> dict:
+    if definicao is None:
+        return {}
+    definicao = str(definicao).strip()
+    if not definicao:
+        return {}
+    if "=" not in definicao:
+        return {"valor": definicao}
+    resultado = {}
+    for pedaco in definicao.split(";"):
+        pedaco = pedaco.strip()
+        if not pedaco or "=" not in pedaco:
+            continue
+        chave, valor = pedaco.split("=", 1)
+        chave = chave.strip()
+        valor = valor.strip()
+        try:
+            resultado[chave] = float(valor)
+        except Exception:
+            resultado[chave] = valor
+    return resultado
+
+
+def buscarLimitesComponentesRbc(idsRbc: List[Any]) -> pd.DataFrame:
+    idsLimpos = []
+    for idRbc in idsRbc:
+        if idRbc is None:
+            continue
+        try:
+            if pd.isna(idRbc):
+                continue
+        except Exception:
+            pass
+        try:
+            idsLimpos.append(int(idRbc))
+        except Exception:
+            pass
+    idsLimpos = sorted(set(idsLimpos))
+    if not idsLimpos:
+        return pd.DataFrame(columns=["id_rbc", "limites_componentes"])
+    conexao = obterConexaoMysql()
+    try:
+        cursor = conexao.cursor(dictionary=True)
+        marcadoresParametros = ", ".join(["%s"] * len(idsLimpos))
+        consultaSql = f"""
+            SELECT
+                rc.fkRbc AS id_rbc,
+                c.idComponente AS id_componente,
+                c.nome AS codigo_componente,
+                c.tipo AS tipo_componente,
+                c.parametros AS parametros,
+                c.unidade AS unidade,
+                rc.definicao AS definicao
+            FROM rbcComponente rc
+            JOIN componente c ON c.idComponente = rc.fkComponente
+            WHERE rc.fkRbc IN ({marcadoresParametros})
+        """
+        cursor.execute(consultaSql, idsLimpos)
+        linhasConsulta = cursor.fetchall()
+        limitesPorRbc = {}
+        for linha in linhasConsulta:
+            idRbc = linha.get("id_rbc")
+            codigoComponente = str(linha.get("codigo_componente") or "").strip()
+            if not codigoComponente:
+                continue
+            if idRbc not in limitesPorRbc:
+                limitesPorRbc[idRbc] = {}
+            definicaoSeparada = separarDefinicaoComponente(linha.get("definicao"))
+            limitesPorRbc[idRbc][codigoComponente] = {
+                "id_componente": linha.get("id_componente"),
+                "tipo_componente": linha.get("tipo_componente"),
+                "parametros": linha.get("parametros"),
+                "unidade": linha.get("unidade"),
+                "definicao": linha.get("definicao"),
+                "limite_alerta": definicaoSeparada.get("limite_alerta"),
+                "limite_critico": definicaoSeparada.get("limite_critico"),
+                "valor": definicaoSeparada.get("valor"),
+            }
+        linhasLimites = []
+        for idRbc, limites in limitesPorRbc.items():
+            linhasLimites.append({"id_rbc": idRbc, "limites_componentes": limites})
+        return pd.DataFrame(linhasLimites)
+    finally:
+        conexao.close()
+
+
+def pegarLimiteComponente(limitesComponentes: Any, codigoComponente: str, nomeLimite: str, valorPadrao: Any = None) -> Any:
+    if not isinstance(limitesComponentes, dict):
+        return valorPadrao
+    componente = limitesComponentes.get(codigoComponente)
+    if not isinstance(componente, dict):
+        return valorPadrao
+    valor = componente.get(nomeLimite)
+    if valor is None:
+        return valorPadrao
+    return valor
+
+
+def pegarValorComponenteTexto(limitesComponentes: Any, codigoComponente: str, valorPadrao: Any = None) -> Any:
+    if not isinstance(limitesComponentes, dict):
+        return valorPadrao
+    componente = limitesComponentes.get(codigoComponente)
+    if not isinstance(componente, dict):
+        return valorPadrao
+    valor = componente.get("valor")
+    if valor is None:
+        return valorPadrao
+    return valor
+
+
+def classificarValorPorLimite(valor: Any, limiteAlerta: Any, limiteCritico: Any) -> Optional[str]:
+    if valor is None or limiteAlerta is None or limiteCritico is None:
+        return None
+    try:
+        valor = float(valor)
+        limiteAlerta = float(limiteAlerta)
+        limiteCritico = float(limiteCritico)
+    except Exception:
+        return None
+    limiteInvertido = limiteCritico < limiteAlerta
+    if limiteInvertido:
+        if valor <= limiteCritico:
+            return "CRITICO"
+        if valor <= limiteAlerta:
+            return "ALERTA"
+        return "NORMAL"
+    if valor >= limiteCritico:
+        return "CRITICO"
+    if valor >= limiteAlerta:
+        return "ALERTA"
+    return "NORMAL"
+
+
+def pegarValorMetricaLinha(linhaDados: pd.Series, coluna: str, converterParaMb: bool = False, valorAlternativo: Any = None) -> Any:
+    valor = linhaDados.get(coluna)
+    if valor is None:
+        valor = valorAlternativo
+    try:
+        if pd.isna(valor):
+            valor = valorAlternativo
+    except Exception:
+        pass
+    if valor is None:
+        return None
+    try:
+        valor = float(valor)
+    except Exception:
+        return None
+    if converterParaMb:
+        return valor / 1024 / 1024
+    return valor
+
+
+def montarMetricaParaLimite(linhaDados: pd.Series, codigo: str, nome: str, valor: Any, unidade: Optional[str]) -> dict:
+    limitesComponentes = linhaDados.get("limites_componentes") or {}
+    limiteAlerta = pegarLimiteComponente(limitesComponentes, codigo, "limite_alerta")
+    limiteCritico = pegarLimiteComponente(limitesComponentes, codigo, "limite_critico")
+    statusMetrica = classificarValorPorLimite(valor, limiteAlerta, limiteCritico)
+    return {
+        "codigo_componente": codigo,
+        "metrica": nome,
+        "valor": consertadorDeValoresBizarrosDoNumpy(valor),
+        "unidade": unidade,
+        "limite_alerta": consertadorDeValoresBizarrosDoNumpy(limiteAlerta),
+        "limite_critico": consertadorDeValoresBizarrosDoNumpy(limiteCritico),
+        "status": statusMetrica,
+    }
+
+
+def aplicarLimitesDoBanco(tabelaDados: pd.DataFrame, tabelaLimites: pd.DataFrame) -> pd.DataFrame:
+    resultado = tabelaDados.copy()
+    if tabelaLimites.empty:
+        resultado["limites_componentes"] = [{} for _ in range(len(resultado))]
+        resultado["alertas_metricas"] = [[] for _ in range(len(resultado))]
+        resultado["total_alertas_metricas"] = 0
+        return resultado
+    resultado["id_rbc"] = pd.to_numeric(resultado["id_rbc"])
+    tabelaLimites = tabelaLimites.copy()
+    tabelaLimites["id_rbc"] = pd.to_numeric(tabelaLimites["id_rbc"])
+    resultado = resultado.merge(tabelaLimites, on="id_rbc", how="left")
+    resultado["limites_componentes"] = [limites if isinstance(limites, dict) else {} for limites in resultado["limites_componentes"]]
+    alertasPorLinha = []
+    criticidadesPorLinha = []
+    for _, linhaDados in resultado.iterrows():
+        memoriaUsadaMb = None
+        memoriaTotal = linhaDados.get("memoria_total_bytes")
+        memoriaDisponivel = linhaDados.get("memoria_disponivel_bytes")
+        try:
+            if pd.notna(memoriaTotal) and pd.notna(memoriaDisponivel):
+                memoriaUsadaMb = (float(memoriaTotal) - float(memoriaDisponivel)) / 1024 / 1024
+        except Exception:
+            memoriaUsadaMb = None
+        quantidadeProcessos = 0
+        processos = linhaDados.get("processos_parsed")
+        if isinstance(processos, list):
+            quantidadeProcessos = len(processos)
+        metricas = [
+            montarMetricaParaLimite(linhaDados, "CPU_PER", "percentual_uso_cpu", pegarValorMetricaLinha(linhaDados, "percentual_uso_cpu"), "%"),
+            montarMetricaParaLimite(linhaDados, "CPU_MAX", "frequencia_cpu_maxima_mhz", pegarValorMetricaLinha(linhaDados, "frequencia_cpu_maxima_mhz"), "MHz"),
+            montarMetricaParaLimite(linhaDados, "CPU_MIN", "frequencia_cpu_minima_mhz", pegarValorMetricaLinha(linhaDados, "frequencia_cpu_minima_mhz"), "MHz"),
+            montarMetricaParaLimite(linhaDados, "CPUUSE", "frequencia_cpu_atual_mhz", pegarValorMetricaLinha(linhaDados, "frequencia_cpu_atual_mhz"), "MHz"),
+            montarMetricaParaLimite(linhaDados, "RAM_PER", "percentual_uso_ram", pegarValorMetricaLinha(linhaDados, "percentual_uso_ram"), "%"),
+            montarMetricaParaLimite(linhaDados, "RAM_MAX", "memoria_total_mb", pegarValorMetricaLinha(linhaDados, "memoria_total_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "RAM_USE", "memoria_usada_mb", memoriaUsadaMb, "MB"),
+            montarMetricaParaLimite(linhaDados, "VOL_PER", "percentual_uso_disco", pegarValorMetricaLinha(linhaDados, "percentual_uso_disco"), "%"),
+            montarMetricaParaLimite(linhaDados, "VOL_MAX", "disco_total_mb", pegarValorMetricaLinha(linhaDados, "disco_total_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "VOL_USE", "disco_usado_mb", pegarValorMetricaLinha(linhaDados, "disco_usado_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "VOL_OUT", "taxa_escrita_disco_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "taxa_escrita_disco_bytes_por_segundo", converterParaMb=True), "MB/s"),
+            montarMetricaParaLimite(linhaDados, "VOL_INP", "taxa_leitura_disco_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "taxa_leitura_disco_bytes_por_segundo", converterParaMb=True), "MB/s"),
+            montarMetricaParaLimite(linhaDados, "WEB_NUM", "latencia_ping_ms", pegarValorMetricaLinha(linhaDados, "latencia_ping_ms"), "ms"),
+            montarMetricaParaLimite(linhaDados, "WEB_INP", "taxa_download_rede_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "taxa_download_rede_bytes_por_segundo", converterParaMb=True), "MB/s"),
+            montarMetricaParaLimite(linhaDados, "WEB_OUT", "taxa_upload_rede_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "taxa_upload_rede_bytes_por_segundo", converterParaMb=True), "MB/s"),
+            montarMetricaParaLimite(linhaDados, "PRS_NUM", "quantidade_processos", quantidadeProcessos, None),
+            montarMetricaParaLimite(linhaDados, "SWP_PER", "percentual_uso_swap", pegarValorMetricaLinha(linhaDados, "percentual_uso_swap"), "%"),
+            montarMetricaParaLimite(linhaDados, "SWP_MAX", "swap_total_mb", pegarValorMetricaLinha(linhaDados, "swap_total_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "SWP_USE", "swap_usado_mb", pegarValorMetricaLinha(linhaDados, "swap_usado_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "SWP_FRE", "swap_livre_mb", pegarValorMetricaLinha(linhaDados, "swap_livre_bytes", converterParaMb=True), "MB"),
+            montarMetricaParaLimite(linhaDados, "SWP_INP", "swap_entrada_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "swap_entrada_bytes", converterParaMb=True), "MB/s"),
+            montarMetricaParaLimite(linhaDados, "SWP_OUT", "swap_saida_mb_por_segundo", pegarValorMetricaLinha(linhaDados, "swap_saida_bytes", converterParaMb=True), "MB/s"),
+        ]
+        alertasLinha = [metrica for metrica in metricas if metrica.get("status") in {"ALERTA", "CRITICO"}]
+        if any(metrica.get("status") == "CRITICO" for metrica in alertasLinha):
+            criticidade = "CRITICO"
+        elif any(metrica.get("status") == "ALERTA" for metrica in alertasLinha):
+            criticidade = "ALTO"
+        else:
+            criticidade = linhaDados.get("criticidade") or "BAIXO"
+        alertasPorLinha.append(alertasLinha)
+        criticidadesPorLinha.append(criticidade)
+    resultado["alertas_metricas"] = alertasPorLinha
+    resultado["total_alertas_metricas"] = [len(alertas) for alertas in alertasPorLinha]
+    resultado["criticidade"] = criticidadesPorLinha
+    return resultado
 def mapearRbcLinhaEmpresa(enderecosMacUnicos: List[str]) -> pd.DataFrame:
     """
     Busca no banco qual RBC pertence a qual linha e empresa.
@@ -686,6 +984,16 @@ def escreverCsvEnriquecido(tabelaDados: pd.DataFrame, caminhoSaida: str, usarCsv
                 nomesProcessosAlerta.append("")
         tabelaCsv["total_processos_alerta"] = totaisProcessosAlerta
         tabelaCsv["processos_alerta_nomes"] = nomesProcessosAlerta
+    if "alertas_metricas" in tabelaCsv.columns:
+        nomesAlertasMetricas = []
+        for alertasMetricas in tabelaCsv["alertas_metricas"]:
+            nomesDaLinha = []
+            if isinstance(alertasMetricas, list):
+                for alertaMetrica in alertasMetricas:
+                    if isinstance(alertaMetrica, dict):
+                        nomesDaLinha.append(f"{alertaMetrica.get('codigo_componente')}:{alertaMetrica.get('status')}")
+            nomesAlertasMetricas.append(", ".join(nomesDaLinha))
+        tabelaCsv["alertas_metricas_nomes"] = nomesAlertasMetricas
     if usarCsvCompacto:
         colunasPreferidas = [
             "endereco_mac", "nome_usuario", "data_hora_iso",
@@ -701,6 +1009,7 @@ def escreverCsvEnriquecido(tabelaDados: pd.DataFrame, caminhoSaida: str, usarCsv
             "taxa_escrita_disco_bytes_por_segundo_human",
             "taxa_download_rede_bytes_por_segundo_human",
             "taxa_upload_rede_bytes_por_segundo_human",
+            "total_alertas_metricas", "alertas_metricas_nomes",
             "total_processos_alerta", "processos_alerta_nomes",
         ]
         tabelaCsv = tabelaCsv[[coluna for coluna in colunasPreferidas if coluna in tabelaCsv.columns]]
@@ -730,6 +1039,30 @@ def escreverCsvEnriquecido(tabelaDados: pd.DataFrame, caminhoSaida: str, usarCsv
                     separators=(",", ":"),
                 ))
             tabelaCsv["processos"] = processosEmJson
+
+
+        if "alertas_metricas" in tabelaCsv.columns:
+            alertasMetricasEmJson = []
+            for alertasMetricas in tabelaCsv["alertas_metricas"]:
+                alertasMetricasEmJson.append(json.dumps(
+                    consertadorDeValoresBizarrosDoNumpy(alertasMetricas if isinstance(alertasMetricas, list) else []),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ))
+            tabelaCsv["alertas_metricas_json"] = alertasMetricasEmJson
+
+
+        if "limites_componentes" in tabelaCsv.columns:
+            limitesComponentesEmJson = []
+            for limitesComponentes in tabelaCsv["limites_componentes"]:
+                limitesComponentesEmJson.append(json.dumps(
+                    consertadorDeValoresBizarrosDoNumpy(limitesComponentes if isinstance(limitesComponentes, dict) else {}),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ))
+            tabelaCsv["limites_componentes_json"] = limitesComponentesEmJson
+
+
         if "processos_alerta_priorizados" in tabelaCsv.columns:
             alertasProcessosEmJson = []
             for itensProcessosAlerta in tabelaCsv["processos_alerta_priorizados"]:
@@ -742,13 +1075,22 @@ def escreverCsvEnriquecido(tabelaDados: pd.DataFrame, caminhoSaida: str, usarCsv
                 else:
                     alertasProcessosEmJson.append("[]")
             tabelaCsv["processos_alerta_json"] = alertasProcessosEmJson
-        tabelaCsv = tabelaCsv.drop(columns=["processos_parsed", "processos_alerta_priorizados"], errors="ignore")
+        
+        
+        tabelaCsv = tabelaCsv.drop(columns=["processos_parsed", "processos_alerta_priorizados", "alertas_metricas", "limites_componentes"], errors="ignore")
+
+    
     tabelaCsv.to_csv(caminhoArquivo, index=False, compression="gzip" if compactarComGzip else None)
     return caminhoArquivo
+
+
+
+
 def montarJsonLeitura(linhaDados: pd.Series, incluirProcessos: bool = True) -> dict:
+    limitesComponentes = linhaDados.get("limites_componentes") or {}
     processosFiltrados = linhaDados.get("processos_alerta_priorizados")
     if not isinstance(processosFiltrados, list):
-        processosFiltrados = processosUteis(linhaDados.get("processos_parsed", []))
+        processosFiltrados = processosUteis(linhaDados.get("processos_parsed", []), limitesComponentes=limitesComponentes)
     leituraJson = {
         "data_hora": linhaDados["data_hora_iso"].isoformat() if pd.notna(linhaDados.get("data_hora_iso")) else None,
         "rbc_status": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("rbc_status")),
@@ -758,6 +1100,9 @@ def montarJsonLeitura(linhaDados: pd.Series, incluirProcessos: bool = True) -> d
         "rbc_status_motivo": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("rbc_status_motivo")),
         "criticidade": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("criticidade")),
         "score": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("score")),
+        "alertas_metricas": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("alertas_metricas")),
+        "total_alertas_metricas": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("total_alertas_metricas")),
+        "limites_componentes": consertadorDeValoresBizarrosDoNumpy(limitesComponentes),
         "latencia_ping_ms": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("latencia_ping_ms")),
         "cpu": {
             "percentual_uso_cpu": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("percentual_uso_cpu")),
@@ -820,8 +1165,8 @@ def montarJsonEmpresasLinhasRbc(tabelaDados: pd.DataFrame, quantidadeUltimasLeit
         })
     linhasJson.sort(key=chaveOrdenacaoLinhaJson)
     return({
-            "id_empresa": consertadorDeValoresBizarrosDoNumpy(tabelaDados.at[0, 'id_empresa']),
-            "nome_empresa": consertadorDeValoresBizarrosDoNumpy(tabelaDados.at[0, 'nome_empresa']),
+            "id_empresa": consertadorDeValoresBizarrosDoNumpy(tabelaDados['id_empresa'].iloc[0]),
+            "nome_empresa": consertadorDeValoresBizarrosDoNumpy(tabelaDados['nome_empresa'].iloc[0]),
             "linhas": linhasJson,
             })       
 def escreverJson(conteudoJson: dict, caminhoSaida: str, indent: Optional[int] = None) -> Path:
@@ -907,11 +1252,12 @@ def imprimirResumoDiagnosticoAlertas(tabelaDados: pd.DataFrame, tabelaMaquinas: 
     if colunaProcessosExiste and totalProcessosSeparados == 0:
         print("Aviso: a coluna processos existe, mas nada foi separado. Provavelmente o formato do texto dos processos não está batendo com o parser.")
     if totalProcessosSeparados > 0 and totalAlertas == 0:
-        print("Aviso: processos foram lidos, mas nenhum passou dos limites configurados no .env.")
+        print("Aviso: processos foram lidos, mas nenhum passou dos limites configurados no banco ou no fallback do .env.")
 def montarJsonProcessosLeitura(linhaDados: pd.Series) -> dict:
+    limitesComponentes = linhaDados.get("limites_componentes") or {}
     processosAlerta = linhaDados.get("processos_alerta_priorizados")
     if not isinstance(processosAlerta, list):
-        processosAlerta = processosUteis(linhaDados.get("processos_parsed", []))
+        processosAlerta = processosUteis(linhaDados.get("processos_parsed", []), limitesComponentes=limitesComponentes)
     processosCompletos = []
     for processo in linhaDados.get("processos_parsed", []) or []:
         if isinstance(processo, dict):
@@ -921,6 +1267,15 @@ def montarJsonProcessosLeitura(linhaDados: pd.Series) -> dict:
         "rbc_status": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("rbc_status")),
         "criticidade_maquina": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("criticidade")),
         "score_maquina": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("score")),
+        "alertas_metricas": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("alertas_metricas")),
+        "total_alertas_metricas": consertadorDeValoresBizarrosDoNumpy(linhaDados.get("total_alertas_metricas")),
+        "limites_processos": {
+            "PRS_STX": consertadorDeValoresBizarrosDoNumpy(pegarValorComponenteTexto(limitesComponentes, "PRS_STX", prefixosProcessosAltaPrioridade)),
+            "PRS_CPU_PER": consertadorDeValoresBizarrosDoNumpy(limitesComponentes.get("PRS_CPU_PER")),
+            "PRS_RAM_PER": consertadorDeValoresBizarrosDoNumpy(limitesComponentes.get("PRS_RAM_PER")),
+            "PRS_RAM_USE": consertadorDeValoresBizarrosDoNumpy(limitesComponentes.get("PRS_RAM_USE")),
+            "PRS_CPU_THR": consertadorDeValoresBizarrosDoNumpy(limitesComponentes.get("PRS_CPU_THR")),
+        },
         "total_processos_lidos": len(processosCompletos),
         "total_processos_alerta": len(processosAlerta),
         "processos_alerta": processosAlerta,
@@ -929,29 +1284,32 @@ def montarJsonProcessosLeitura(linhaDados: pd.Series) -> dict:
 def detectarPossiveisCrashsProcessos(tabelaRbc: pd.DataFrame) -> List[dict]:
     """
     Detecta processo que existia em uma leitura e sumiu na próxima.
-    Isso não prova crash sozinho, mas é um forte sinal quando combinado com RBC offline,
-    pico de CPU, crescimento de memória ou processo de alta prioridade.
+    Usa PRS_STX do banco para saber o que é alta prioridade.
     """
     eventos = []
     processosAnterioresPorIdentidade = {}
+    limitesAnterioresPorIdentidade = {}
     tabelaOrdenada = tabelaRbc.sort_values("data_hora_iso")
     for _, linhaDados in tabelaOrdenada.iterrows():
         dataHoraAtual = linhaDados["data_hora_iso"].isoformat() if pd.notna(linhaDados.get("data_hora_iso")) else None
+        limitesComponentes = linhaDados.get("limites_componentes") or {}
         processosAtuais = {}
         for processo in linhaDados.get("processos_parsed", []) or []:
             if not isinstance(processo, dict):
                 continue
             identidade = identificarProcesso(processo)
             processosAtuais[identidade] = processo
+            limitesAnterioresPorIdentidade[identidade] = limitesComponentes
         identidadesAnteriores = set(processosAnterioresPorIdentidade.keys())
         identidadesAtuais = set(processosAtuais.keys())
         processosQueSumiram = identidadesAnteriores - identidadesAtuais
         for identidade in processosQueSumiram:
             processoAnterior = processosAnterioresPorIdentidade.get(identidade, {})
+            limitesDoProcessoAnterior = limitesAnterioresPorIdentidade.get(identidade, {})
             if not processoAnterior:
                 continue
             textoProcesso = buscarProcessoPorTexto(processoAnterior)
-            altaPrioridade = processoPossuiPrioridade(processoAnterior)
+            altaPrioridade = processoPossuiPrioridade(processoAnterior, limitesComponentes=limitesDoProcessoAnterior)
             if altaPrioridade or any(palavra in textoProcesso for palavra in palavrasChaveProcessosImportantes):
                 eventos.append({
                     "tipo": "possivel_crash_ou_finalizacao_inesperada",
@@ -973,6 +1331,7 @@ def detectarPossiveisVazamentosMemoriaProcessos(tabelaRbc: pd.DataFrame) -> List
     tabelaOrdenada = tabelaOrdenada.sort_values("data_hora_iso")
     for _, linhaDados in tabelaOrdenada.iterrows():
         dataHora = linhaDados["data_hora_iso"]
+        limitesComponentes = linhaDados.get("limites_componentes") or {}
         for processo in linhaDados.get("processos_parsed", []) or []:
             if not isinstance(processo, dict):
                 continue
@@ -983,10 +1342,11 @@ def detectarPossiveisVazamentosMemoriaProcessos(tabelaRbc: pd.DataFrame) -> List
                 "pid": consertadorDeValoresBizarrosDoNumpy(processo.get("pid")),
                 "name": consertadorDeValoresBizarrosDoNumpy(processo.get("name")),
                 "cmdline": limparLinhaComandoProcessos(processo.get("cmdline")),
-                "alta_prioridade": processoPossuiPrioridade(processo),
+                "alta_prioridade": processoPossuiPrioridade(processo, limitesComponentes=limitesComponentes),
                 "rss_mb": valores["rss_mb"],
                 "memory_percent": valores["memory_percent"],
                 "num_threads": valores["num_threads"],
+                "limite_rss_mb_alerta": pegarLimiteComponente(limitesComponentes, "PRS_RAM_USE", "limite_alerta", limiteAlertaMemoriaResidenteMbProcesso),
             })
     for identidade, historico in historicoPorIdentidade.items():
         if len(historico) < 3:
@@ -1002,7 +1362,8 @@ def detectarPossiveisVazamentosMemoriaProcessos(tabelaRbc: pd.DataFrame) -> List
                 crescimentosPositivos += 1
         proporcaoCrescimento = crescimentosPositivos / max(len(historico) - 1, 1)
         altaPrioridade = bool(historico[-1].get("alta_prioridade"))
-        limiteCrescimento = limiteCrescimentoMemoriaResidenteMbProcesso * (0.5 if altaPrioridade else 1.0)
+        limiteRssBanco = float(historico[-1].get("limite_rss_mb_alerta") or limiteAlertaMemoriaResidenteMbProcesso)
+        limiteCrescimento = min(limiteCrescimentoMemoriaResidenteMbProcesso * (0.5 if altaPrioridade else 1.0), limiteRssBanco)
         if crescimentoTotal >= limiteCrescimento and proporcaoCrescimento >= 0.6:
             eventos.append({
                 "tipo": "possivel_vazamento_memoria",
@@ -1014,6 +1375,7 @@ def detectarPossiveisVazamentosMemoriaProcessos(tabelaRbc: pd.DataFrame) -> List
                 "rss_mb_inicial": round(rssInicial, 2),
                 "rss_mb_final": round(rssFinal, 2),
                 "crescimento_total_rss_mb": round(crescimentoTotal, 2),
+                "limite_rss_mb_alerta_usado": round(limiteRssBanco, 2),
                 "proporcao_leituras_com_crescimento": round(proporcaoCrescimento, 4),
                 "cmdline": historico[-1].get("cmdline"),
                 "observacao": "RSS cresceu de forma recorrente no histórico analisado.",
@@ -1091,6 +1453,21 @@ def main():
         tabelaMaquinas,
         limiteMinutosSemLeitura=limiteMinutosSemLeitura
     )
+    print("-" * columns)
+    print("-" * columns)
+    print(f"usando banco de dados:{usarBancoDados}")
+    print("-" * columns)
+    print("-" * columns)
+    if usarBancoDados:
+        idsRbc = tabelaMaquinas["id_rbc"].dropna().unique().tolist()
+        tabelaLimites = buscarLimitesComponentesRbc(idsRbc)
+        tabelaMaquinas = aplicarLimitesDoBanco(tabelaMaquinas, tabelaLimites)
+        print(f"Limites do banco aplicados: {len(tabelaLimites)} RBC(s) com definição encontrada.")
+    else:
+        tabelaMaquinas["limites_componentes"] = [{} for _ in range(len(tabelaMaquinas))]
+        tabelaMaquinas["alertas_metricas"] = [[] for _ in range(len(tabelaMaquinas))]
+        tabelaMaquinas["total_alertas_metricas"] = 0
+        print("NO_DB=true: limites do banco não foram buscados; processos usam fallback do .env.")
     print("\nResumo de empresas, linhas e RBCs encontradas:")
     totalEmpresas = tabelaMaquinas["id_empresa"].nunique(dropna=False) if "id_empresa" in tabelaMaquinas.columns else 0
     totalLinhas = tabelaMaquinas["id_linha"].nunique(dropna=False) if "id_linha" in tabelaMaquinas.columns else 0
@@ -1125,7 +1502,7 @@ def main():
             print("\nRBCs sem cadastro no MySQL:")
             for _, linha in semCadastro.iterrows():
                 print(f"- MAC: {linha['endereco_mac']}")
-    columns = os.get_terminal_size().columns
+
     print("-" * columns)
     print("-" * columns)
     if pularAlertasProcessos:
