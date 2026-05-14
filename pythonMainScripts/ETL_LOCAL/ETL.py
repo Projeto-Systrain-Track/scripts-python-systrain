@@ -10,10 +10,8 @@ import json
 import ast
 import os
 load_dotenv()
-try:
-    columns = os.get_terminal_size().columns
-except OSError:
-    columns = 80
+
+
 def lerVariavelAmbienteBooleana(nomeVariavel: str) -> bool:
     """
     Lê uma variável do .env
@@ -41,30 +39,6 @@ def lerVariavelAmbienteDecimal(nomeVariavel: str) -> float:
     """
     return float(os.getenv(nomeVariavel))
 
-configuracaoMysql = {
-    "host": os.getenv("MYSQL_HOST"),
-    "port": int(os.getenv("MYSQL_PORT")),
-    "user": os.getenv("MYSQL_USER"),
-    "password": os.getenv("MYSQL_PASSWORD"),
-    "database": os.getenv("MYSQL_DATABASE"),
-}
-limiteAlertaCpuProcesso = float(os.getenv("PROCESS_CPU_ALERT"))
-limiteAlertaPercentualMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_PERCENT_ALERT"))
-limiteAlertaMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_MB_ALERT"))
-limiteAlertaThreadsProcesso = int(os.getenv("PROCESS_THREADS_ALERT"))
-limiteMaximoProcessosPorLeitura = int(os.getenv("PROCESS_MAX_PER_READING", os.getenv("MAX_PROCESSES_PER_READING")))
-limiteMinutosRbcOffline = float(os.getenv("RBC_OFFLINE_GAP_MINUTES"))
-csvCompactoPadrao = os.getenv("COMPACT_CSV_DEFAULT").strip().lower()
-indentacaoJsonPadrao = os.getenv("JSON_INDENT").strip()
-linhas = int(os.getenv("LAST_N"))
-prefixosProcessosAltaPrioridade = tuple(elemento.strip().lower() for elemento in os.getenv("HIGH_PRIORITY_PROCESS_PREFIXES").split(",")if elemento.strip())
-limiteAlertaCpuProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_CPU_ALERT"))
-limiteAlertaPercentualMemoriaProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_MEMORY_PERCENT_ALERT"))
-limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_RSS_MB_ALERT"))
-limitePicoCpuProcesso = float(os.getenv("PROCESS_CPU_SPIKE_ALERT"))
-limitePicoMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_SPIKE_ALERT"))
-limiteCrescimentoMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_GROWTH_MB_ALERT"))
-palavrasChaveProcessosImportantes = tuple(elemento.strip().lower()for elemento in os.getenv("IMPORTANT_PROCESS_KEYWORDS").split(","))
 
 
 def transformarParaDict(**argumentosNomeados):
@@ -345,24 +319,24 @@ def motivosAlertasDosProcessos(processo: dict, valoresAnteriores: Optional[dict]
     if processoAltaPrioridade:
         motivosAlerta.append("processo_rbc_alta_prioridade")
     if valoresProcesso["cpu_percent"] >= limiteCpuAtual:
-        motivosAlerta.append(f"cpu_percent >= {limiteCpuAtual:g}")
+        motivosAlerta.append(f"cpu_percent >= {limiteCpuAtual}")
     if valoresProcesso["memory_percent"] >= limiteMemoriaAtual:
-        motivosAlerta.append(f"memory_percent >= {limiteMemoriaAtual:g}")
+        motivosAlerta.append(f"memory_percent >= {limiteMemoriaAtual}")
     if valoresProcesso["rss_mb"] >= limiteMemoriaResidenteAtual:
-        motivosAlerta.append(f"rss_mb >= {limiteMemoriaResidenteAtual:g}")
+        motivosAlerta.append(f"rss_mb >= {limiteMemoriaResidenteAtual}")
     if valoresProcesso["num_threads"] >= limiteThreadsAtual:
-        motivosAlerta.append(f"num_threads >= {limiteThreadsAtual:g}")
+        motivosAlerta.append(f"num_threads >= {limiteThreadsAtual}")
     if valoresAnteriores:
         variacaoCpu = valoresProcesso["cpu_percent"] - float(valoresAnteriores.get("cpu_percent") or 0)
         variacaoMemoria = valoresProcesso["memory_percent"] - float(valoresAnteriores.get("memory_percent") or 0)
         variacaoMemoriaResidente = valoresProcesso["rss_mb"] - float(valoresAnteriores.get("rss_mb") or 0)
         multiplicadorPico = 0.5 if processoAltaPrioridade else 1.0
         if variacaoCpu >= limitePicoCpuProcesso * multiplicadorPico:
-            motivosAlerta.append(f"anomalia_cpu_delta >= {limitePicoCpuProcesso * multiplicadorPico:g}")
+            motivosAlerta.append(f"anomalia_cpu_delta >= {limitePicoCpuProcesso * multiplicadorPico}")
         if variacaoMemoria >= limitePicoMemoriaProcesso * multiplicadorPico:
-            motivosAlerta.append(f"anomalia_memory_percent_delta >= {limitePicoMemoriaProcesso * multiplicadorPico:g}")
+            motivosAlerta.append(f"anomalia_memory_percent_delta >= {limitePicoMemoriaProcesso * multiplicadorPico}")
         if variacaoMemoriaResidente >= limiteCrescimentoMemoriaResidenteMbProcesso * multiplicadorPico:
-            motivosAlerta.append(f"anomalia_rss_growth_mb >= {limiteCrescimentoMemoriaResidenteMbProcesso * multiplicadorPico:g}")
+            motivosAlerta.append(f"anomalia_rss_growth_mb >= {limiteCrescimentoMemoriaResidenteMbProcesso * multiplicadorPico}")
     if any(palavraChave in textoPesquisavelProcesso for palavraChave in palavrasChaveProcessosImportantes):
         if (
             valoresProcesso["cpu_percent"] >= limiteCpuAtual / 2
@@ -950,7 +924,7 @@ def adicionarColunasStatusRbc(tabelaDados: pd.DataFrame,limiteMinutosSemLeitura:
     )
     resultado["rbc_status_motivo"] = np.where(
         resultado["rbc_status"].eq("OFFLINE"),
-        f"RBC sem leitura recente há {limiteMinutosSemLeitura:g}+ minutos",
+        f"RBC sem leitura recente há {limiteMinutosSemLeitura}+ minutos",
         None,
     )
     resultado["rbc_gap_limite_minutos"] = limiteMinutosSemLeitura
@@ -1424,10 +1398,37 @@ def escreverJsonsProcessosSeparados(tabelaDados: pd.DataFrame,quantidadeUltimasL
             escreverJson(conteudoJson, caminhoSaida, indent=indent)
         )
     return caminhosGerados
+
+    
 def main():
     """
     Roda o ETL completo usando apenas as configurações do .env.
     """
+    configuracaoMysql = {
+        "host": os.getenv("MYSQL_HOST"),
+        "port": int(os.getenv("MYSQL_PORT")),
+        "user": os.getenv("MYSQL_USER"),
+        "password": os.getenv("MYSQL_PASSWORD"),
+        "database": os.getenv("MYSQL_DATABASE"),
+    }
+    columns = 80
+    limiteAlertaCpuProcesso = float(os.getenv("PROCESS_CPU_ALERT"))
+    limiteAlertaPercentualMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_PERCENT_ALERT"))
+    limiteAlertaMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_MB_ALERT"))
+    limiteAlertaThreadsProcesso = int(os.getenv("PROCESS_THREADS_ALERT"))
+    limiteMaximoProcessosPorLeitura = int(os.getenv("PROCESS_MAX_PER_READING", os.getenv("MAX_PROCESSES_PER_READING")))
+    limiteMinutosRbcOffline = float(os.getenv("RBC_OFFLINE_GAP_MINUTES"))
+    csvCompactoPadrao = os.getenv("COMPACT_CSV_DEFAULT").strip().lower()
+    indentacaoJsonPadrao = os.getenv("JSON_INDENT").strip()
+    linhas = int(os.getenv("LAST_N"))
+    prefixosProcessosAltaPrioridade = tuple(elemento.strip().lower() for elemento in os.getenv("HIGH_PRIORITY_PROCESS_PREFIXES").split(",")if elemento.strip())
+    limiteAlertaCpuProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_CPU_ALERT"))
+    limiteAlertaPercentualMemoriaProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_MEMORY_PERCENT_ALERT"))
+    limiteAlertaMemoriaResidenteMbProcessoAltaPrioridade = float(os.getenv("HIGH_PRIORITY_PROCESS_RSS_MB_ALERT"))
+    limitePicoCpuProcesso = float(os.getenv("PROCESS_CPU_SPIKE_ALERT"))
+    limitePicoMemoriaProcesso = float(os.getenv("PROCESS_MEMORY_SPIKE_ALERT"))
+    limiteCrescimentoMemoriaResidenteMbProcesso = float(os.getenv("PROCESS_RSS_GROWTH_MB_ALERT"))
+    palavrasChaveProcessosImportantes = tuple(elemento.strip().lower()for elemento in os.getenv("IMPORTANT_PROCESS_KEYWORDS").split(","))
     caminhoCsvEntrada = os.getenv("LOCAL_INPUT_CSV", "df.csv")
     caminhoJsonSaida = os.getenv("LOCAL_OUTPUT_JSON")
     caminhoCsvSaidaConfigurado = os.getenv("LOCAL_OUTPUT_CSV")
@@ -1538,6 +1539,6 @@ def main():
         )
         print(f"JSONs de processos gerados: {len(caminhosJsonProcessos)}")
     print(f"CSV gerado: {caminhoCsvSaida}")
-if __name__ == "__main__":
+
+def lambda_handler(event, context):
     main()
- 
