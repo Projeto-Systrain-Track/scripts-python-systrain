@@ -902,7 +902,7 @@ def enriquecerDataframeMaquinas(tabelaDados: pd.DataFrame, tabelaMapeamento: pd.
                 frequenciasHumanas.append(converterMegaHertzParaEquivalenteHumano(valorMegaHertz))
             tabelaMesclada[f"{coluna}_human"] = frequenciasHumanas
     return tabelaMesclada
-def adicionarColunasStatusRbc(tabelaDados: pd.DataFrame,limiteMinutosSemLeitura: float = limiteMinutosRbcOffline) -> pd.DataFrame:
+def adicionarColunasStatusRbc(tabelaDados: pd.DataFrame, limiteMinutosSemLeitura: float = limiteMinutosRbcOffline) -> pd.DataFrame:
     if tabelaDados.empty:
         return tabelaDados.copy()
     resultado = tabelaDados.copy()
@@ -930,7 +930,8 @@ def adicionarColunasStatusRbc(tabelaDados: pd.DataFrame,limiteMinutosSemLeitura:
     resultado["rbc_gap_limite_minutos"] = limiteMinutosSemLeitura
     resultado["leitura_anterior_data_hora"] = None
     resultado["gap_leitura_anterior_minutos"] = resultado["idade_ultima_leitura_minutos"]
-    resultado["gap_leitura_anterior_segundos"] = resultado["idade_ultima_leitura_segundos"]
+    resultado["custo_leitura_anterior_minutos"] = resultado["idade_ultima_leitura_minutos"] * 1875
+    resultado["custo_leitura_anterior_segundos"] = resultado["idade_ultima_leitura_segundos"] * (1875 / 60)
     return resultado
 def escreverCsvEnriquecido(tabelaDados: pd.DataFrame, caminhoSaida: str, usarCsvCompacto: bool = True, compactarComGzip: bool = False) -> Path:
     """
@@ -1443,7 +1444,7 @@ def main():
     compactarCsvComGzip = lerVariavelAmbienteBooleana("CSV_GZIP")
     indentacaoJson = lerVariavelAmbienteInteira("JSON_INDENT")
     usarCsvCompacto = False if gravarCsvCompleto else lerVariavelAmbienteBooleana("COMPACT_CSV_DEFAULT")
-    tabelaDados = carregarTodosCsvLocais(    caminhoCsvEntrada,    analisarColunaProcessos = not pularAlertasProcessos)
+    tabelaDados = carregarTodosCsvLocais(caminhoCsvEntrada, analisarColunaProcessos = not pularAlertasProcessos)
     enderecosMacUnicos = sorted(tabelaDados["endereco_mac"].dropna().unique().tolist())
     if usarBancoDados:
         tabelaMapeamento = mapearRbcLinhaEmpresa(enderecosMacUnicos)
@@ -1490,7 +1491,7 @@ def main():
                 status = ultimaLeitura.get("rbc_status")
                 totalLeiturasRbc = len(tabelaRbc)
                 print(
-                    f"    RBC {idRbc} - {nomeRbc} | "
+                    f"RBC {idRbc} - {nomeRbc} | "
                     f"MAC: {mac} | "
                     f"Status: {status} | "
                     f"Leituras: {totalLeiturasRbc}"
