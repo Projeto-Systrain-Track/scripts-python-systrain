@@ -7,6 +7,8 @@ from pathlib import Path
 import pandas as pd
 import subprocess
 import psutil
+from io import StringIO
+
 import boto3
 import uuid
 import time
@@ -25,7 +27,13 @@ load_dotenv(dotenv_path=".env.dev")
 
 NOME_BUCKET = os.getenv("S3_BUCKET_NAME")
 
-
+s3 = boto3.client(
+    's3', 
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    aws_session_token=os.getenv("AWS_SESSION_TOKEN")
+)
 
 init(autoreset=True)
 
@@ -100,49 +108,13 @@ def coletar_metricas_sistema():
         nome_usuario = os.environ.get("USERNAME") or os.environ.get("USER") or "desconhecido"
 
     percentual_uso_cpu = psutil.cpu_percent(interval=None)
-    frequencia_cpu = psutil.cpu_freq()
-
-    frequencia_cpu_atual_mhz = round(frequencia_cpu.current, 2) if frequencia_cpu else 0
-    frequencia_cpu_minima_mhz = round(frequencia_cpu.min, 2) if frequencia_cpu else 0
-    frequencia_cpu_maxima_mhz = round(frequencia_cpu.max, 2) if frequencia_cpu else 0
-
-    memoria_virtual = psutil.virtual_memory()
-    percentual_uso_ram = memoria_virtual.percent
-
-    memoria_swap = psutil.swap_memory()
-
-    percentual_uso_swap = 0
-    if memoria_swap.total > 0:
-        percentual_uso_swap = (memoria_swap.used / memoria_swap.total) * 100
-
-    uso_disco = psutil.disk_usage('/')
-
-    io_disco_inicial = psutil.disk_io_counters()
-    io_rede_inicial = psutil.net_io_counters()
-
-    time.sleep(INTERVALO_SEGUNDOS)
-
-    io_disco_final = psutil.disk_io_counters()
-    io_rede_final = psutil.net_io_counters()
+    
+    percentual_uso_ram = psutil.virtual_memory().percent
+    percentual_uso_disco = psutil.disk_usage('/').percent
 
     latencia_ping_ms = medir_ping()
 
-    taxa_leitura_disco_bytes_por_segundo = (
-        io_disco_final.read_bytes - io_disco_inicial.read_bytes
-    ) / INTERVALO_SEGUNDOS
-
-    taxa_escrita_disco_bytes_por_segundo = (
-        io_disco_final.write_bytes - io_disco_inicial.write_bytes
-    ) / INTERVALO_SEGUNDOS
-
-    taxa_download_rede_bytes_por_segundo = (
-        io_rede_final.bytes_recv - io_rede_inicial.bytes_recv
-    ) / INTERVALO_SEGUNDOS
-
-    taxa_upload_rede_bytes_por_segundo = (
-        io_rede_final.bytes_sent - io_rede_inicial.bytes_sent
-    ) / INTERVALO_SEGUNDOS
-
+    
     lista_processos = get_all_processes()
     data_hora_iso = datetime.now().isoformat()
 
@@ -151,37 +123,13 @@ def coletar_metricas_sistema():
         "nome_usuario": nome_usuario,
 
         "percentual_uso_cpu": percentual_uso_cpu,
-        "frequencia_cpu_atual_mhz": frequencia_cpu_atual_mhz,
-        "frequencia_cpu_minima_mhz": frequencia_cpu_minima_mhz,
-        "frequencia_cpu_maxima_mhz": frequencia_cpu_maxima_mhz,
-
-        "memoria_total_bytes": int(memoria_virtual.total),
-        "memoria_disponivel_bytes": int(memoria_virtual.available),
         "percentual_uso_ram": percentual_uso_ram,
-
-        "swap_total_bytes": int(memoria_swap.total),
-        "swap_usado_bytes": int(memoria_swap.used),
-        "swap_livre_bytes": int(memoria_swap.free),
-        "swap_entrada_bytes": int(memoria_swap.sin),
-        "swap_saida_bytes": int(memoria_swap.sout),
-        "percentual_uso_swap": percentual_uso_swap,
-
-        "disco_total_bytes": int(uso_disco.total),
-        "disco_usado_bytes": int(uso_disco.used),
-        "disco_livre_bytes": int(uso_disco.free),
-        "percentual_uso_disco": uso_disco.percent,
-
-        "taxa_leitura_disco_bytes_por_segundo": int(taxa_leitura_disco_bytes_por_segundo),
-        "taxa_escrita_disco_bytes_por_segundo": int(taxa_escrita_disco_bytes_por_segundo),
-
+        "percentual_uso_disco": percentual_uso_disco,
         "latencia_ping_ms": latencia_ping_ms,
-        "taxa_download_rede_bytes_por_segundo": int(taxa_download_rede_bytes_por_segundo),
-        "taxa_upload_rede_bytes_por_segundo": int(taxa_upload_rede_bytes_por_segundo),
-
         "processos": str(lista_processos),
         "data_hora_iso": data_hora_iso
     }])
-
+    df_metricas["data_hora_iso"] = pd.to_datetime(df_metricas["data_hora_iso"], errors="coerce")    
     return df_metricas
 
 
@@ -208,8 +156,8 @@ def upload_directory_to_s3(local_dir: str, bucket: str, s3_prefix: str):
 
             s3.upload_file(
                 Filename=str(file_path),
-                Bucket=bucket,
-                Key=s3_key
+                Bucket="systrain-bucket-csv",
+                Key="raw/df.csv"
             )
 
             print(f"Uploaded: s3://{bucket}/{s3_key}")
@@ -220,11 +168,10 @@ print(Fore.GREEN + "🚀 SYS TRAIN TRACK - MONITORAMENTO")
 print(Fore.GREEN + "==========================================\n")
 
 contador = 0
-
-
+buffer_dados = []
 def iniciar_captura():
     global contador
-
+    global buffer_dados
     dirs = ensure_output_dirs(OUTPUT_DIR)
 
     nome_arquivo_csv = os.getenv("S3_INPUT_KEY", "df.csv")
@@ -236,20 +183,46 @@ def iniciar_captura():
     caminho_csv = dirs["base"] / nome_arquivo_csv
 
     df_atual = coletar_metricas_sistema()
-
-    salvar_csv_append(df_atual, caminho_csv)
+    buffer_dados.append(df_atual)
 
     contador += 1
 
     if contador >= 5:
         contador = 0
-
+        df_lote = pd.concat(buffer_dados, ignore_index=True)
+        df_lote["data_hora_envio"] = datetime.now().isoformat()
+        try:
+            # Tenta buscar o arquivo no S3
+            response = s3.get_object(
+                Bucket=NOME_BUCKET,
+                Key="raw/df.csv"
+            )
+            conteudo = response['Body'].read().decode('utf-8')
+            df_existente = pd.read_csv(StringIO(conteudo))
+            df_existente.columns = df_existente.columns.str.strip()
+            
+        except ClientError as e:
+            # Se o erro for "Chave não encontrada" (arquivo não existe), cria um DataFrame vazio
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                print(Fore.YELLOW + "Arquivo 'raw/df.csv' não encontrado no S3. Criando um df vazio.")
+                df_existente = pd.DataFrame()
+            else:
+                # Se for outro erro de permissão ou rede, repassa o erro
+                print("Erro: ", e)
+        
+        # Se o df_existente estiver vazio, o concat vai apenas usar o df_lote
+        df_combinado = pd.concat([df_existente, df_lote], ignore_index=True)
+        df_lote["data_hora_envio"] = datetime.now().isoformat()
+        # Salva localmente de forma limpa, sobrescrevendo
+        df_combinado.to_csv(caminho_csv, index=False, header=True)
+        
+        # Faz o upload para o S3
         upload_directory_to_s3(
             local_dir=OUTPUT_DIR,
             bucket=NOME_BUCKET,
             s3_prefix=output_s3_prefix
         )
-
+        buffer_dados.clear()
     dados = df_atual.iloc[0]
 
     limpar_terminal()
@@ -269,20 +242,15 @@ def iniciar_captura():
 
     print(Fore.WHITE + "🧠 CPU")
     print(cor_status(cpu) + f"   Uso: {cpu:.1f}%")
-    print(Fore.WHITE + f"   Freq: {dados['frequencia_cpu_atual_mhz']} MHz\n")
 
     print(Fore.WHITE + "💾 RAM")
-    print(cor_status(ram) + f"   Uso: {ram:.1f}%")
-    print(Fore.WHITE + f"   Livre: {dados['memoria_disponivel_bytes'] // (1024 ** 3)} GB\n")
+    print(Fore.WHITE + f"   Uso: {ram:.1f}%\n")
 
     print(Fore.WHITE + "🗄 DISCO")
     print(cor_status(disco) + f"   Uso: {disco:.1f}%")
-    print(Fore.WHITE + f"   Livre: {dados['disco_livre_bytes'] // (1024 ** 3)} GB\n")
 
     print(Fore.WHITE + "🌐 REDE")
     print(Fore.CYAN + f"   Ping: {ping} ms")
-    print(Fore.MAGENTA + f"   ↓ {dados['taxa_download_rede_bytes_por_segundo']} B/s")
-    print(Fore.MAGENTA + f"   ↑ {dados['taxa_upload_rede_bytes_por_segundo']} B/s\n")
 
     print(Fore.WHITE + "⚙ PROCESSOS")
     print(f"CONTADOR: {contador}")
@@ -290,8 +258,10 @@ def iniciar_captura():
     print(f"OUTPUT DIR: {OUTPUT_DIR}")
     print(f"OUTPUT S3 PREFIX: {output_s3_prefix}")
     print(f"NOME BUCKET: {NOME_BUCKET}")
+    print("BUCKET:", os.getenv("S3_BUCKET_NAME"))
     print(Fore.GREEN + "==========================================")
 
 
 while True:
     iniciar_captura()
+    time.sleep(1)

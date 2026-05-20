@@ -26,7 +26,7 @@ def cfg_mysql() -> dict:
 
 def cfg_s3() -> dict:
     return {
-        "region_name":     os.getenv("AWS_REGION", "us-east-1"),
+        "region_name":"us-east-1",
         "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
         "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "aws_session_token": os.getenv("AWS_SESSION_TOKEN"),
@@ -368,34 +368,11 @@ def extrair_e_enriquecer(
     df["custo_leitura_anterior_minutos"] = df["idade_ultima_leitura_minutos"] * 1875
     df["custo_leitura_anterior_segundos"] = df["idade_ultima_leitura_segundos"] * 1875/60
     df["horario_atual_etl"] = horarioAtualEtl.isoformat()
-    
-    df.drop(columns=["memoria_total_bytes",
-        "memoria_disponivel_bytes",
-        "swap_total_bytes",
-        "swap_usado_bytes",
-        "swap_livre_bytes",
-        "swap_entrada_bytes",
-        "swap_saida_bytes",
-        "disco_total_bytes",
-        "disco_usado_bytes",
-        "disco_livre_bytes",
-        "taxa_leitura_disco_bytes_por_segundo",
-        "taxa_escrita_disco_bytes_por_segundo",
-        "taxa_download_rede_bytes_por_segundo",
-        "taxa_upload_rede_bytes_por_segundo",
-        "taxa_upload_rede_bytes_por_segundo",
-        "frequencia_cpu_atual_mhz",
-        "frequencia_cpu_minima_mhz",
-        "frequencia_cpu_maxima_mhz", "processos"
-        ],
-        inplace=True
-    )
 
     df["score"] = (
-        df["percentual_uso_cpu"].fillna(0) * 0.3
-        + df["percentual_uso_ram"].fillna(0) * 0.3
+        df["percentual_uso_cpu"].fillna(0) * 0.4
+        + df["percentual_uso_ram"].fillna(0) * 0.4  
         + df["percentual_uso_disco"].fillna(0) * 0.2
-        + df["percentual_uso_swap"].fillna(0) * 0.2
     )
 
 
@@ -475,13 +452,12 @@ def dashboardOperacao():
     # FILTRO DIÁRIO
 
     df = df.sort_values("data_hora_iso", ascending=True)
-
-    df["diff_segundos"] = (
-        df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_iso"]
+    df["data_hora_envio"] = pd.to_datetime(df["data_hora_envio"], errors="coerce")
+    df["diff_envio"] = (
+        df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
         .diff()
-        .dt.total_seconds()
     )
-    print("AGRUPADO", df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_iso"].diff())
+    df.drop(columns=["processos"], inplace=True, errors="ignore")
 
     df_diario = df[pd.to_datetime(df["data_hora_iso"], errors="coerce").dt.date == pd.Timestamp.now().date()]
     if (not df_diario.empty):

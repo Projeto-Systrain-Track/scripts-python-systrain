@@ -1,0 +1,47 @@
+# Ambiente virtual
+venv/
+.env/
+.venv/
+
+pythonMainScripts/ETL_LOCAL/.env
+pythonMainScripts/.env.dev
+
+pythonMainScripts/ETL_LOCAL/.env
+pythonMainScripts/.env.dev
+**/.env
+**/.env.*
+
+# Variáveis de ambiente
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Pandas / notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# PyCharm
+.idea/
+
+# Arquivos CSV locais
+raw/
+*.csv
+
+# Build
+dist/
+build/
