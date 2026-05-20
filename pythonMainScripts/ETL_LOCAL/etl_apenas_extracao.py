@@ -7,14 +7,13 @@ import mysql.connector
 import pandas as pd
 import numpy as np
 import boto3
-import ast
 import os
-
+import datetime
 load_dotenv()
 
-# ---------------------------------------------------------------------------
+# 
 # Configuração
-# ---------------------------------------------------------------------------
+# 
 
 def cfg_mysql() -> dict:
     return {
@@ -87,10 +86,6 @@ def separar_definicao(definicao: Any) -> dict:
     return resultado
 
 
-# ---------------------------------------------------------------------------
-# 1. EXTRAÇÃO DO S3
-# ---------------------------------------------------------------------------
-
 def extrair_csv_s3(
     bucket: Optional[str] = None,
     key: Optional[str] = None,
@@ -140,13 +135,13 @@ def extrair_csv_s3(
     else:
         df = pd.read_csv(BytesIO(conteudo_bytes), low_memory=False)
 
-    # --- validação de colunas obrigatórias ------------------------------
+    #  validação de colunas obrigatórias 
     obrigatorias = ["endereco_mac", "data_hora_iso"]
     ausentes = [c for c in obrigatorias if c not in df.columns]
     if ausentes:
         raise ValueError(f"Colunas obrigatórias ausentes no CSV: {', '.join(ausentes)}")
 
-    # --- normalização básica --------------------------------------------
+    #  normalização básica
     df["endereco_mac"]  = df["endereco_mac"].map(limpar_mac)
     df["data_hora_iso"] = pd.to_datetime(df["data_hora_iso"], errors="coerce")
 
@@ -166,10 +161,6 @@ def extrair_csv_s3(
 
     print(f"[S3] {len(df):,} linhas carregadas | {df['endereco_mac'].nunique()} MACs únicos.")
     return df
-
-# ---------------------------------------------------------------------------
-# 2. ENRIQUECIMENTO COM O BANCO
-# ---------------------------------------------------------------------------
 
 def conexao_mysql():
     return mysql.connector.connect(**cfg_mysql())
@@ -281,9 +272,6 @@ def buscar_limites_rbc(ids_rbc: List[int]) -> pd.DataFrame:
     ])
 
 
-# ---------------------------------------------------------------------------
-# 3. PIPELINE PRINCIPAL
-# ---------------------------------------------------------------------------
 
 def extrair_e_enriquecer(
     bucket: Optional[str] = None,
@@ -321,7 +309,7 @@ def extrair_e_enriquecer(
         last_n_env = os.getenv("LAST_N")
         ultimas_n_linhas = int(last_n_env) if last_n_env else None
 
-    # --- 1. extração S3 -------------------------------------------------
+    #  1. extração S3 
     df = extrair_csv_s3(bucket=bucket, key=key, ultimas_n_linhas=ultimas_n_linhas)
 
     if not usar_banco:
@@ -332,7 +320,7 @@ def extrair_e_enriquecer(
         print("[banco] Modo offline (usar_banco=False). Colunas do banco preenchidas com nulos.")
         return df
 
-    # --- 2. mapeamento MAC → RBC/linha/empresa --------------------------
+    #  2. mapeamento MAC → RBC/linha/empresa --
     macs_unicos = sorted(df["endereco_mac"].dropna().unique().tolist())
     print(f"[banco] Buscando mapeamento para {len(macs_unicos)} MAC(s) …")
     mapeamento = buscar_mapeamento_rbc(macs_unicos)
@@ -341,10 +329,7 @@ def extrair_e_enriquecer(
     if sem_cadastro:
         print(f"[banco] {len(sem_cadastro)} MAC(s) sem cadastro no banco: {sem_cadastro}")
 
-    df = df.merge(mapeamento, on="endereco_mac", how="left")
-
-    # fallback para MACs sem cadastro
-    
+    df = df.merge(mapeamento, on="endereco_mac", how="left")    
         
     df["id_empresa"] = df.get("id_empresa", None)
     df["nome_empresa"] = df["nome_empresa"].fillna("SEM_EMPRESA") if "nome_empresa" in df.columns else "SEM_EMPRESA"
@@ -364,6 +349,7 @@ def extrair_e_enriquecer(
     df["idade_ultima_leitura_minutos"] = (
         horarioAtualEtl - df["data_hora_iso"]
     ).dt.total_seconds() / 60.0
+
     df["idade_ultima_leitura_segundos"] = (
         df["idade_ultima_leitura_minutos"] * 60.0
     )
@@ -381,11 +367,7 @@ def extrair_e_enriquecer(
     df["gap_leitura_anterior_minutos"] = df["idade_ultima_leitura_minutos"]
     df["custo_leitura_anterior_minutos"] = df["idade_ultima_leitura_minutos"] * 1875
     df["custo_leitura_anterior_segundos"] = df["idade_ultima_leitura_segundos"] * 1875/60
-    
-    df["data_hora_iso"] = horarioAtualEtl.isoformat()
     df["horario_atual_etl"] = horarioAtualEtl.isoformat()
-    
-
     
     df.drop(columns=["memoria_total_bytes",
         "memoria_disponivel_bytes",
@@ -404,7 +386,7 @@ def extrair_e_enriquecer(
         "taxa_upload_rede_bytes_por_segundo",
         "frequencia_cpu_atual_mhz",
         "frequencia_cpu_minima_mhz",
-        "frequencia_cpu_maxima_mhz"
+        "frequencia_cpu_maxima_mhz", "processos"
         ],
         inplace=True
     )
@@ -441,10 +423,32 @@ def extrair_e_enriquecer(
 
     return df
 
+def buscarQuantidadeServidores(idEmpresa, idLinha):
+    conn = conexao_mysql()
+    try:
+        cursor = conn.cursor(True)
+        sql = """
+                SELECT
+                    COUNT(r.idRbc) AS quantidade_servidores
+                    FROM rbc as r
+                        JOIN linha  as  l ON r.fkLinha   = l.idLinha
+                        JOIN empresa as e ON e.idEmpresa = l.fkEmpresa
+                    WHERE e.idEmpresa = %s and l.idLinha = %s;
+            """
+        cursor.execute(sql, (idEmpresa, idLinha))
+        resultado = cursor.fetchall()
+    finally:
+        conn.close()
+
+    if not resultado:
+        return pd.DataFrame(columns=[
+            "quantidade_servidores"
+        ])
+    return pd.DataFrame(resultado, columns=["quantidade_servidores"])
 
 
 def main():
-    df = extrair_e_enriquecer(bucket="")
+    df = extrair_e_enriquecer()
 
     print("\n" + "=" * 60)
     print("DataFrame enriquecido — resumo")
@@ -463,6 +467,50 @@ def main():
     return df
 
 
+def dashboardOperacao():
+    df: pd.DataFrame = extrair_e_enriquecer()
+    i = 1
+    custos_por_empresa = {}
+
+    # FILTRO DIÁRIO
+
+    df = df.sort_values("data_hora_iso", ascending=True)
+
+    df["diff_segundos"] = (
+        df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_iso"]
+        .diff()
+        .dt.total_seconds()
+    )
+    print("AGRUPADO", df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_iso"].diff())
+
+    df_diario = df[pd.to_datetime(df["data_hora_iso"], errors="coerce").dt.date == pd.Timestamp.now().date()]
+    if (not df_diario.empty):
+        df_diario.sort_values("data_hora_iso", ascending=False, inplace=True)
+    else:
+        print("Nenhum dado encontrado para o dia de hoje.")
+
+        
+    limite = pd.Timestamp.now().date() - pd.Timedelta(days=7)
+
+    df.to_csv('dataframe_enriquecido.csv', index=False)
+
+    df_semanal = df[pd.to_datetime(df["data_hora_iso"], errors="coerce").dt.date >= limite]
+    if(not df_semanal.empty):
+        for (idEmpresa, nomeEmpresa), tabelaEmpresa in df_semanal.groupby(["id_empresa", "nome_empresa"], dropna=True):
+            print("Fazendo leitura da empresa: "+ str(nomeEmpresa))
+            custo_empresa = {}
+            for (idLinha, nomeLinha), tabelaLinha in df_semanal.groupby(["id_linha", "nome_linha"], dropna=True):
+                print("Fazendo leitura da linha: " + str(nomeLinha))
+                custo_linha = {}
+                quantidade_servidores = buscarQuantidadeServidores(idEmpresa, idLinha)
+                for (idRbc, nomeRbc), tabelaRbc in df_semanal.groupby(["id_rbc", "nome_rbc"], dropna=True):
+                    tabelaRbc.sort_values("data_hora_iso", ascending=False, inplace=True)
+                    ultima_captura = tabelaRbc.iloc[0]
+                    
+                    
+
+
+
 #def lambda_handler(event, context):
 #    df = extrair_e_enriquecer(
 #        bucket=event.get("bucket"),
@@ -477,4 +525,4 @@ def main():
 #    }
 
 
-main()
+dashboardOperacao()
