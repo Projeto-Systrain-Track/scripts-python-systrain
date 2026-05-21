@@ -6,6 +6,7 @@ from io import StringIO, BytesIO
 import mysql.connector
 import pandas as pd
 import numpy as np
+import json
 import boto3
 import os
 import datetime
@@ -89,7 +90,6 @@ def separar_definicao(definicao: Any) -> dict:
 def extrair_csv_s3(
     bucket: Optional[str] = None,
     key: Optional[str] = None,
-    ultimas_n_linhas: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Baixa o CSV do S3 e devolve um DataFrame já com tipos básicos corrigidos.
@@ -100,7 +100,6 @@ def extrair_csv_s3(
         Nome do bucket. Se None, lê de S3_BUCKET no .env.
     key : str, opcional
         Caminho do arquivo dentro do bucket. Se None, lê de S3_KEY no .env.
-    ultimas_n_linhas : int, opcional
         Quando informado, carrega apenas as últimas N linhas de dados
         (mantém o cabeçalho). Útil para janelas de monitoramento.
 
@@ -125,15 +124,7 @@ def extrair_csv_s3(
     conteudo_bytes: bytes = resp["Body"].read()
     print(f"[S3] Download concluído ({len(conteudo_bytes):,} bytes).")
 
-    if ultimas_n_linhas:
-        # Lê apenas as últimas N linhas sem carregar tudo na memória de uma vez
-        linhas = conteudo_bytes.decode("utf-8").splitlines()
-        cabecalho = linhas[0]
-        dados = linhas[max(1, len(linhas) - ultimas_n_linhas):]
-        conteudo_str = "\n".join([cabecalho] + dados)
-        df = pd.read_csv(StringIO(conteudo_str), low_memory=False)
-    else:
-        df = pd.read_csv(BytesIO(conteudo_bytes), low_memory=False)
+    df = pd.read_csv(BytesIO(conteudo_bytes), low_memory=False)
 
     #  validação de colunas obrigatórias 
     obrigatorias = ["endereco_mac", "data_hora_iso"]
@@ -276,7 +267,6 @@ def buscar_limites_rbc(ids_rbc: List[int]) -> pd.DataFrame:
 def extrair_e_enriquecer(
     bucket: Optional[str] = None,
     key: Optional[str] = None,
-    ultimas_n_linhas: Optional[int] = None,
     usar_banco: bool = True,
 ) -> pd.DataFrame:
     """
@@ -292,7 +282,6 @@ def extrair_e_enriquecer(
         Nome do bucket S3. Padrão: variável de ambiente S3_BUCKET.
     key : str, opcional
         Chave (caminho) do arquivo no bucket. Padrão: variável S3_KEY.
-    ultimas_n_linhas : int, opcional
         Carrega apenas as últimas N linhas do CSV (útil para monitoramento).
         Padrão: carrega tudo (ou LAST_N do .env quando não informado).
     usar_banco : bool
@@ -304,14 +293,9 @@ def extrair_e_enriquecer(
         DataFrame com todas as colunas originais + colunas do banco.
         Nunca salva nada em disco nem no S3.
     """
-    # resolve ultimas_n_linhas a partir do .env se não informado
-    if ultimas_n_linhas is None:
-        last_n_env = os.getenv("LAST_N")
-        ultimas_n_linhas = int(last_n_env) if last_n_env else None
-
+    
     #  1. extração S3 
-    df = extrair_csv_s3(bucket=bucket, key=key, ultimas_n_linhas=ultimas_n_linhas)
-
+    df = extrair_csv_s3(bucket=bucket, key=key)
     if not usar_banco:
         # modo offline: colunas do banco com valores nulos
         for col in ("id_empresa", "nome_empresa", "id_linha", "nome_linha", "id_rbc", "nome_rbc"):
@@ -439,59 +423,90 @@ def main():
     print(f"Leituras c/ limites do banco: {com_limite:,}")
     print(df)
     df.to_csv('dataframe_enriquecido.csv', index=False)
-
     print("=" * 60)
     return df
 
 
 def dashboardOperacao():
-    df: pd.DataFrame = extrair_e_enriquecer()
-    i = 1
-    custos_por_empresa = {}
+    df = extrair_e_enriquecer()
 
-    # FILTRO DIÁRIO
-
-    df = df.sort_values("data_hora_iso", ascending=True)
     df["data_hora_envio"] = pd.to_datetime(df["data_hora_envio"], errors="coerce")
-    df["diff_envio"] = (
+
+    df = df.sort_values(
+        ["id_empresa", "id_linha", "id_rbc", "data_hora_envio"]
+    )
+    
+    df["diff_envio_segundos"] = (
         df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
         .diff()
-    )
-    df.drop(columns=["processos"], inplace=True, errors="ignore")
+    ).dt.total_seconds()
 
-    df_diario = df[pd.to_datetime(df["data_hora_iso"], errors="coerce").dt.date == pd.Timestamp.now().date()]
-    if (not df_diario.empty):
-        df_diario.sort_values("data_hora_iso", ascending=False, inplace=True)
-    else:
-        print("Nenhum dado encontrado para o dia de hoje.")
+    TEMPO_COLETA = 5
+    TOLERANCIA = 30
+    CUSTO_SEGUNDO = 31.25
 
+    df["segundos_excesso"] = (
+        df["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
+    ).clip(lower=0)
+    
+    df["qtd_servidores"] = df.groupby(
+        ["id_empresa", "id_linha"]
+    )["id_rbc"].transform("nunique")
+    
+    df.drop(columns=["processos", "limites_componentes", "idade_ultima_leitura_minutos", "idade_ultima_leitura_segundos"], inplace=True)
         
-    limite = pd.Timestamp.now().date() - pd.Timedelta(days=7)
-
-    df.to_csv('dataframe_enriquecido.csv', index=False)
-
-    df_semanal = df[pd.to_datetime(df["data_hora_iso"], errors="coerce").dt.date >= limite]
-    if(not df_semanal.empty):
-        for (idEmpresa, nomeEmpresa), tabelaEmpresa in df_semanal.groupby(["id_empresa", "nome_empresa"], dropna=True):
-            print("Fazendo leitura da empresa: "+ str(nomeEmpresa))
-            custo_empresa = {}
-            for (idLinha, nomeLinha), tabelaLinha in df_semanal.groupby(["id_linha", "nome_linha"], dropna=True):
-                print("Fazendo leitura da linha: " + str(nomeLinha))
-                custo_linha = {}
-                quantidade_servidores = buscarQuantidadeServidores(idEmpresa, idLinha)
-                for (idRbc, nomeRbc), tabelaRbc in df_semanal.groupby(["id_rbc", "nome_rbc"], dropna=True):
-                    tabelaRbc.sort_values("data_hora_iso", ascending=False, inplace=True)
-                    ultima_captura = tabelaRbc.iloc[0]
-                    
-                    
-
-
+    df["custo_desperdicado"] = df["segundos_excesso"] * CUSTO_SEGUNDO / df["qtd_servidores"]
+    
+    df.to_csv("df.csv", index=False)
+    resultado = {}
+    for (id_empresa, nome_empresa), df_empresa in df.groupby(["id_empresa", "nome_empresa"]):
+        custo_empresa = df_empresa["custo_desperdicado"].sum()
+        resultado[id_empresa] = {
+            "nome": nome_empresa,
+            "custo_total": float(custo_empresa),
+            "linhas": {},
+            "graficos": {}
+        }
+        df_lote_custo = (
+            df_empresa
+                .groupby(["data_hora_envio"], as_index=False)
+                .agg(
+                    custo_desperdicado=("custo_desperdicado", "sum"),
+                    objetivoFinanceiro=("objetivoFinanceiro", "mean")
+                )
+                .sort_values("data_hora_envio")
+        )
+        resultado[id_empresa]["graficos"]["custo_ao_longo_tempo"] = [
+            {
+                "data": str(linha["data_hora_envio"]),
+                "custo": float(linha["custo_desperdicado"]),
+                "objetivoFinanceiro": str(linha["objetivoFinanceiro"])
+            }
+            for indice, linha in df_lote_custo.iterrows()
+        ]
+        
+        for (id_linha, nome_linha), df_lin in df_empresa.groupby(["id_linha", "nome_linha"]):
+            custo_linha = df_lin["custo_desperdicado"].sum()
+            resultado[id_empresa]["linhas"][id_linha] = {
+                "nome": nome_linha,
+                "custo_total": float(custo_linha),
+                "servidores": {}
+            }
+            for (id_rbc, nome_rbc), df_rbc in df_lin.groupby(["id_rbc", "nome_rbc"]):
+                custo_rbc = df_rbc["custo_desperdicado"].sum()
+                resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
+                    "nome": nome_rbc,
+                    "custo_total": float(custo_rbc)
+                }
+    print("Resultado: ", resultado)
+    
+    with open("saida.json", "w", encoding="utf-8") as f:
+        json.dump(resultado, f, indent=2, ensure_ascii=False)
 
 #def lambda_handler(event, context):
 #    df = extrair_e_enriquecer(
 #        bucket=event.get("bucket"),
 #        key=event.get("key"),
-#        ultimas_n_linhas=event.get("ultimas_n_linhas"),
 #        usar_banco=not event.get("no_db", False),
 #    )
 #    return {
