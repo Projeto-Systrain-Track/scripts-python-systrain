@@ -12,6 +12,8 @@ import os
 import datetime
 load_dotenv()
 
+import uuid
+
 # 
 # Configuração
 # 
@@ -502,6 +504,219 @@ def dashboardOperacao():
     
     with open("saida.json", "w", encoding="utf-8") as f:
         json.dump(resultado, f, indent=2, ensure_ascii=False)
+        
+        
+#===
+def gerar_id_incidente():
+    return str(uuid.uuid4())
+
+
+def converter_float(valor, padrao=0.0):
+    try:
+        if pd.isna(valor):
+            return padrao
+        return float(valor)
+    except Exception:
+        return padrao
+
+
+#deteccões dos incidentes e atribuir tipo
+def detectar_offline(row):
+    if row.get("rbc_status") != "OFFLINE":
+        return None
+
+    return {
+        "titulo": "RBC offline",
+        "descricao": row.get(
+            "rbc_status_motivo",
+            "Servidor sem comunicação."
+        ),
+        "nivel": "Crítico",
+        "tipo": "OFFLINE"
+    }
+
+
+def detectar_cpu(row, limites):
+    cpu = converter_float(row.get("percentual_uso_cpu"))
+    
+   
+    config_comp = limites.get("CPU_PER", {})
+    limite_padrao = converter_float(os.getenv("LIMITE_PADRAO_CPU", 90.0))
+    limite = config_comp.get("limite_critico", limite_padrao)
+
+    if cpu < limite:
+        return None
+
+    unidade = config_comp.get("unidade", "%")
+    tipo = config_comp.get("tipo_componente", "Processador")
+
+    return {
+        "titulo": f"Alerta Crítico: {tipo} sobrecarregado",
+        "descricao": (
+            f"O servidor '{row.get('nome_rbc')}' ultrapassou o limite operacional seguro de {limite}{unidade} "
+            f"Valor coletado no momento: {cpu:.1f}{unidade}" #deixa as descrições dinamicas com base na etl grandona
+            
+        ),
+        "nivel": "Alto",
+        "tipo": "CPU"
+    }
+
+
+def detectar_ram(row, limites):
+    ram = converter_float(row.get("percentual_uso_ram"))
+    
+    limite_padrao = converter_float(os.getenv("LIMITE_PADRAO_RAM", 85.0))
+    limite = limites.get("RAM_PER", {}).get("limite_critico", limite_padrao)
+
+    if ram < limite:
+        return None
+
+    return {
+        "titulo": "Consumo elevado de RAM",
+        "descricao": f"Servidor {row.get('nome_rbc')} está consumindo {ram:.1f}% da RAM",
+        "nivel": "Médio",
+        "tipo": "RAM"
+    }
+
+
+def detectar_disco(row, limites):
+    disco = converter_float(row.get("percentual_uso_disco"))
+    
+    limite_padrao = converter_float(os.getenv("LIMITE_PADRAO_DISCO", 90.0))
+    limite = limites.get("DISK_PER", {}).get("limite_critico", limite_padrao)
+
+    if disco < limite:
+        return None
+
+    return {
+        "titulo": "Uso crítico de disco",
+        "descricao": f"Servidor {row.get('nome_rbc')} está utilizando {disco:.1f}% do disco",
+        "nivel": "Alto",
+        "tipo": "DISCO"
+    }
+
+
+def detectar_latencia(row):
+    latencia = converter_float(row.get("latencia_ping_ms"))
+    
+    limite_latencia = converter_float(os.getenv("LIMITE_PADRAO_LATENCIA", 200.0))
+
+    if latencia < limite_latencia:
+        return None
+
+    return {
+        "titulo": "Alta latência de rede",
+        "descricao": f"Servidor {row.get('nome_rbc')} está com latência de {latencia:.1f} ms",
+        "nivel": "Alto",
+        "tipo": "LATENCIA"
+    }
+
+
+def montar_incidente(row, deteccao):
+    horario_evento = row.get("data_hora_iso")
+    if isinstance(horario_evento, pd.Timestamp):
+        horario_evento = horario_evento.isoformat()
+
+    return {
+        "id": gerar_id_incidente(),
+
+        "empresa": {
+            "id": row.get("id_empresa"),
+            "nome": row.get("nome_empresa")
+        },
+
+        "linha": {
+            "id": row.get("id_linha"),
+            "nome": row.get("nome_linha")
+        },
+
+        "rbc": {
+            "id": row.get("id_rbc"),
+            "nome": row.get("nome_rbc")
+        },
+        
+        #tudo q vai do incidente para o dash
+        "tipo": deteccao["tipo"],
+        "titulo": deteccao["titulo"],
+        "descricao": deteccao["descricao"],
+        "nivel": deteccao["nivel"],
+        "status": "ABERTO",
+        "responsavel": "NÃO ATRIBUIDO", 
+
+        "horario_evento": str(horario_evento),
+        "horario_processamento": str(row.get("horario_atual_etl")), 
+
+        "hardware": { 
+            "cpu": converter_float(row.get("percentual_uso_cpu")),
+            "ram": converter_float(row.get("percentual_uso_ram")),
+            "disco": converter_float(row.get("percentual_uso_disco")),
+            "latencia": converter_float(row.get("latencia_ping_ms"))
+        },
+
+        "score_operacional": converter_float(row.get("score")),
+        "offline": (row.get("rbc_status") == "OFFLINE")
+    }
+
+
+#principal de tudo
+def gerar_incidentes(df: pd.DataFrame):
+    incidentes = []
+
+    for _, row in df.iterrows():
+        limites = row.get("limites_componentes", {})
+        if not isinstance(limites, dict):
+            limites = {}
+
+        deteccoes = [
+            detectar_offline(row),
+            detectar_cpu(row, limites),
+            detectar_ram(row, limites),
+            detectar_disco(row, limites),
+            detectar_latencia(row)
+        ]
+
+    
+        deteccoes_ativas = [d for d in deteccoes if d is not None]
+
+        for deteccao in deteccoes_ativas:
+            incidente = montar_incidente(row, deteccao)
+            incidentes.append(incidente)
+
+    return incidentes
+
+def salvar_incidentes_json(incidentes, caminho="incidentes.json"): #trocar dps
+    try:
+        with open(caminho, "w", encoding="utf-8") as indvLetuca:
+            json.dump(
+                fix_numpy(incidentes),
+                indvLetuca,
+                indent=2,
+                ensure_ascii=False
+            )
+        print(f"[incidentes] {len(incidentes)} incidentes salvos com sucesso em '{caminho}'")
+    except Exception as e:
+        print(f"Erro: falha ao salvar o arquivo JSON de incidentes: {e}")
+        
+        
+def dashboardIncidentes():
+    print("\nTESTE INCIDENTES")
+    print("=" * 60)
+
+    #pode ser um problema dps pq chama o banco mais uma vez (?)
+    df = extrair_e_enriquecer().head(10)
+
+
+    print(f"[incidentes] Processando {len(df)} leituras...")
+    incidentes = gerar_incidentes(df)
+    
+    if not incidentes:
+        print("[incidentes] Nenhum incidente crítico detectado no momento")
+
+    salvar_incidentes_json(incidentes, "incidentes.json")
+    print(f"[incidentes] Concluído - {len(incidentes)} incidentes gerados")
+
+    return incidentes 
+
 
 #def lambda_handler(event, context):
 #    df = extrair_e_enriquecer(
@@ -517,3 +732,4 @@ def dashboardOperacao():
 
 
 dashboardOperacao()
+dashboardIncidentes()
