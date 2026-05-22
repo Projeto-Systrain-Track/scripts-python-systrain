@@ -135,9 +135,7 @@ def coletar_metricas_sistema():
 
 def salvar_csv_append(df_atual: pd.DataFrame, caminho_arquivo: Path):
     caminho_arquivo.parent.mkdir(parents=True, exist_ok=True)
-
     arquivo_existe = caminho_arquivo.exists()
-
     df_atual.to_csv(
         caminho_arquivo,
         mode="a",
@@ -145,23 +143,18 @@ def salvar_csv_append(df_atual: pd.DataFrame, caminho_arquivo: Path):
         index=False
     )
 
-
 def upload_directory_to_s3(local_dir: str, bucket: str, s3_prefix: str):
     local_path = Path(local_dir)
-
     for file_path in local_path.rglob("*"):
         if file_path.is_file():
             relative_path = file_path.relative_to(local_path)
             s3_key = f"{s3_prefix}/{relative_path}".replace("\\", "/")
-
             s3.upload_file(
                 Filename=str(file_path),
                 Bucket="systrain-bucket-csv",
                 Key="raw/df.csv"
             )
-
             print(f"Uploaded: s3://{bucket}/{s3_key}")
-
 
 print(Fore.GREEN + "==========================================")
 print(Fore.GREEN + "🚀 SYS TRAIN TRACK - MONITORAMENTO")
