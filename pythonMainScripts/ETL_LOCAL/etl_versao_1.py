@@ -375,7 +375,7 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
     dia = data_atual.day
     
     if tipo == "alerta":
-        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/{mac_adress}.csv"
+        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/abertos/{mac_adress}.csv"
     elif tipo == "tratado":
         caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/tratados/{mac_adress}.csv"
     elif tipo == "semanal":

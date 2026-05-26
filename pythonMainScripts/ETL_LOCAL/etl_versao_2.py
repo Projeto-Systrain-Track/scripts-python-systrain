@@ -44,7 +44,7 @@ def buscar_e_juntar_arquivos_s3(bucket: str):
         mes = pd.Timestamp.now().month
         dia = pd.Timestamp.now().day
         
-        caminho_alertas = f"{empresa.get("Prefix")}{ano}/{mes}/{dia}/alertas/"
+        caminho_alertas = f"{empresa.get("Prefix")}{ano}/{mes}/{dia}/alertas/abertos/"
         arquivos_alertas = s3.list_objects_v2(Bucket=bucket, Prefix=f"{caminho_alertas}", Delimiter="/")
         # print(arquivos_semanal.get("Contents"))
         for arquivo_tratado in arquivos_semanal.get("Contents", []):
@@ -96,13 +96,13 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
     return None
 
 
-def dashboardOperacao(df: pd.DataFrame):
-    df["data_hora_envio"] = pd.to_datetime(df["data_hora_envio"], errors="coerce")
-    df = df.sort_values(
+def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
+    df_tratado["data_hora_envio"] = pd.to_datetime(df_tratado["data_hora_envio"], errors="coerce")
+    df_tratado = df_tratado.sort_values(
         ["id_empresa", "id_linha", "id_rbc", "data_hora_envio"]
     )
-    df["diff_envio_segundos"] = (
-        df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
+    df_tratado["diff_envio_segundos"] = (
+        df_tratado.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
         .diff()
     ).dt.total_seconds()
 
@@ -110,28 +110,30 @@ def dashboardOperacao(df: pd.DataFrame):
     TOLERANCIA = 30
     CUSTO_SEGUNDO = 31.25
 
-    df["segundos_excesso"] = (
-        df["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
+    df_tratado["segundos_excesso"] = (
+        df_tratado["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
     ).clip(lower=0)
     
-    df["qtd_servidores"] = df.groupby(
+    df_tratado["qtd_servidores"] = df_tratado.groupby(
         ["id_empresa", "id_linha"]
     )["id_rbc"].transform("nunique")
     
-    df["custo_desperdicado"] = df["segundos_excesso"] * CUSTO_SEGUNDO / df["qtd_servidores"]
-    df.to_csv("df.csv", index=False)
+    df_tratado["custo_desperdicado"] = df_tratado["segundos_excesso"] * CUSTO_SEGUNDO / df_tratado["qtd_servidores"]
+    df_tratado.to_csv("df_tratado.csv", index=False)
     resultado = {}
     
-    for (id_empresa, nome_empresa), df_empresa in df.groupby(["id_empresa", "nome_empresa"]):
-        custo_empresa = df_empresa["custo_desperdicado"].sum()
+    for (id_empresa, nome_empresa), df_tratado_empresa in df_tratado.groupby(["id_empresa", "nome_empresa"]):
+        # TRANSFORMANDO O DF TRATADO
+        custo_empresa = df_tratado_empresa["custo_desperdicado"].sum()
         resultado[id_empresa] = {
             "nome": nome_empresa,
-            "custo_total": float(custo_empresa),
+            "custo_total_semana": float(custo_empresa),
+            "custo_por_dia": {},
             "linhas": {},
             "graficos": {}
         }
-        df_lote_custo = (
-            df_empresa
+        df_tratado_lote_custo = (
+            df_tratado_empresa
                 .groupby(["data_hora_envio"], as_index=False)
                 .agg(
                     custo_desperdicado=("custo_desperdicado", "sum"),
@@ -145,23 +147,46 @@ def dashboardOperacao(df: pd.DataFrame):
                 "custo": float(linha["custo_desperdicado"]),
                 "objetivoFinanceiro": str(linha["objetivoFinanceiro"])
             }
-            for indice, linha in df_lote_custo.iterrows()
+            for indice, linha in df_tratado_lote_custo.iterrows()
         ]
-        
-        for (id_linha, nome_linha), df_lin in df_empresa.groupby(["id_linha", "nome_linha"]):
-            custo_linha = df_lin["custo_desperdicado"].sum()
+        for dia, df_diario_empresa in df_tratado_empresa.groupby(df_tratado_empresa["data_hora_envio"].dt.date):
+            data = str(dia)
+            dia_semana = pd.Timestamp(dia).day_name()
+            custo_dia = df_diario_empresa["custo_desperdicado"].sum()
+
+            resultado[id_empresa]["custo_por_dia"][data] = {
+                "dia_semana": str(dia_semana), 
+                "custo_dia": str(custo_dia)
+            }
+            
+        for (id_linha, nome_linha), df_tratado_linha in df_tratado_empresa.groupby(["id_linha", "nome_linha"]):
+            custo_linha = df_tratado_linha["custo_desperdicado"].sum()
             resultado[id_empresa]["linhas"][id_linha] = {
                 "nome": nome_linha,
                 "custo_total": float(custo_linha),
+                "custo_por_dia": {},
                 "servidores": {}
             }
-            for (id_rbc, nome_rbc), df_rbc in df_lin.groupby(["id_rbc", "nome_rbc"]):
-                custo_rbc = df_rbc["custo_desperdicado"].sum()
+            for dia, df_diario_linha in df_tratado_linha.groupby(df_tratado_linha["data_hora_envio"].dt.date):
+                data = str(dia)
+                dia_semana = pd.Timestamp(dia).day_name()
+                custo_dia = df_diario_linha["custo_desperdicado"].sum()
+                resultado[id_empresa]["linhas"][id_linha]["custo_por_dia"][data] = {
+                    "dia_semana": str(dia_semana), 
+                    "custo_dia": str(custo_dia)
+                }
+
+            for (id_rbc, nome_rbc), df_tratado_rbc in df_tratado_linha.groupby(["id_rbc", "nome_rbc"]):
+                custo_rbc = df_tratado_rbc["custo_desperdicado"].sum()
                 resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
                     "nome": nome_rbc,
                     "custo_total": float(custo_rbc)
                 }
-    # print("Resultado: ", resultado)
+    
+    # TRANSFORMANDO O DF DE ALERTAS
+    for (id_empresa, nome_empresa), df_alertas_empresa in df_alertas.groupby(["id_empresa", "nome_empresa"]):
+        print(df_alertas_empresa)
+        
     
     with open("saida.json", "w", encoding="utf-8") as f:
         json.dump(resultado, f, indent=2, ensure_ascii=False)
@@ -171,9 +196,8 @@ def dashboardOperacao(df: pd.DataFrame):
 def main():
     bucket = os.getenv("S3_BUCKET")
     df_principal_tratado, df_principal_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
-    df_principal_alertas.to_csv("df_principal_alertas.csv", index=False)
-    df_principal_tratado.to_csv("df_principal_tratado.csv", index=False)
-
+    dashboardOperacao(df_tratado=df_principal_tratado, df_alertas=df_principal_alertas)
+    
 
 
 
