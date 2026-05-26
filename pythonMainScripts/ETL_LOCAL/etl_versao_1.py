@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from io import BytesIO
 from typing import Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import boto3
 from botocore.exceptions import ClientError
 import numpy as np
@@ -238,16 +238,20 @@ def aplicar_alertas(df: pd.DataFrame):
     alertas_gerados = []
     qte_alertas_criticos = 0
     qte_alertas_atencao = 0
+    qte_alertas_cpu = 0 
+    qte_alertas_ram = 0 
+    qte_alertas_disco = 0 
+    qte_alertas_latencia = 0 
     for linha in df.itertuples():
         for nome_coluna, limites in colunas_limite.items():
             valor_captura = getattr(linha, nome_coluna)
             limite_atencao = getattr(linha, limites[0])
             limite_critico = getattr(linha, limites[1])
             status_alerta, limite_usado = classificar_alerta(valor_captura, limite_atencao, limite_critico)
-
             if status_alerta is None:
                 continue
             else:
+
                 alertas_gerados.append(
                     {
                         "id_empresa": linha.id_empresa,
@@ -256,12 +260,13 @@ def aplicar_alertas(df: pd.DataFrame):
                         "nome_linha":   linha.nome_linha,
                         "id_rbc": linha.id_rbc,
                         "nome_rbc": linha.nome_rbc,
+                        "endereco_mac": linha.endereco_mac,
                         "campo_alerta": nome_coluna,
                         "valor_medido": valor_captura,
                         "componente_afetado": limites[0].split("_")[1],
                         "tipo_alerta": status_alerta,
                         "motivo_alerta": retornar_motivo_alerta(nome_coluna=nome_coluna, status=status_alerta, limite=limite_usado), 
-                        "data_captura": linha.data_hora_iso,
+                        "data_hora_iso": linha.data_hora_iso,
                         "limite_atencao": limite_atencao,
                         "limite_critico": limite_critico,
                         "url_jira": linha.url_jira,
@@ -274,6 +279,20 @@ def aplicar_alertas(df: pd.DataFrame):
                 else:
                     qte_alertas_atencao+=1
 
+                if nome_coluna == "percentual_uso_cpu":
+                    qte_alertas_cpu += 1
+                elif nome_coluna == "percentual_uso_ram":
+                    qte_alertas_ram += 1
+                elif nome_coluna == "percentual_uso_disco":
+                    qte_alertas_disco += 1
+                elif nome_coluna == "latencia_ping_ms":
+                    qte_alertas_latencia += 1
+                    
+                    
+    df["qte_alertas_cpu"] = qte_alertas_criticos
+    df["qte_alertas_ram"] = qte_alertas_criticos
+    df["qte_alertas_disco"] = qte_alertas_criticos
+    df["qte_alertas_latencia"] = qte_alertas_criticos
     df["qte_alertas_critico"] = qte_alertas_criticos
     df["qte_alertas_atencao"] = qte_alertas_atencao
     alertas_gerados = pd.DataFrame(alertas_gerados)
@@ -306,13 +325,11 @@ def aplicar_status_online(df: pd.DataFrame) -> pd.DataFrame:
         "OFFLINE",
         "ONLINE",
     )
-
     df["rbc_status_motivo"] = np.where(
         df["rbc_status"] == "OFFLINE",
         f"Sem leitura há {LIMITE_OFFLINE_MINUTOS}+ min",
         None,
     )
-
     return df
 
 def arquivo_existe(bucket, key):
@@ -325,6 +342,7 @@ def arquivo_existe(bucket, key):
             return False
         else:
             raise e
+        
 def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
     s3 = boto3.client("s3", **cfg_s3())
     print(f"[S3] Baixando s3://{bucket}/{key} ...")
@@ -333,14 +351,11 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
         resposta = s3.get_object(Bucket=bucket, Key=key)
         conteudo = resposta["Body"].read()
         print(f"[S3] {len(conteudo):,} bytes recebidos.")
-
         df = pd.read_csv(BytesIO(conteudo))
-
         obrigatorias = ["endereco_mac", "data_hora_iso"]
         ausentes = [c for c in obrigatorias if c not in df.columns]
         if ausentes:
             raise ValueError(f"Colunas obrigatórias ausentes no CSV: {ausentes}")
-
         df["endereco_mac"]  = df["endereco_mac"].map(limpar_mac)
         df["data_hora_iso"] = pd.to_datetime(df["data_hora_iso"], errors="coerce")
 
@@ -348,25 +363,26 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
         return df
     return None
     
-def caminho_para_tratado(df: pd.DataFrame):
+def caminho_para_tratado(df: pd.DataFrame, tipo: str):
     nome_empresa = df["nome_empresa"].dropna().unique()
+    nome_empresa = nome_empresa[0]
+    nome_empresa = nome_empresa.replace(" ", "_").lower()
     mac_adress = df["endereco_mac"].dropna().unique()
     mac_adress = mac_adress[0]
-    nome_empresa = nome_empresa[0]
     data_atual = datetime.now()
     ano = data_atual.year
     mes = data_atual.month
     dia = data_atual.day
     
-    caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/{mac_adress}.csv"
+    if tipo == "alerta":
+        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/{mac_adress}.csv"
+    elif tipo == "tratado":
+        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/tratados/{mac_adress}.csv"
+    elif tipo == "semanal":
+        caminho = f"trusted/{nome_empresa}/semanal/{mac_adress}.csv"
     return caminho
 
-
-
-
-
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-
     df = extrair_csv_s3(bucket=bucket, key=key)
     mac_adress_servidor = df["endereco_mac"].dropna().unique().tolist()
     print(f"[banco] Buscando mapeamento para {len(mac_adress_servidor)} MAC(s)...")
@@ -420,7 +436,6 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
         df.drop(columns=["_id_rbc_num", "id_rbc_lim"], errors="ignore", inplace=True)
         print(f"[banco] Limites aplicados para {tabela_limites['id_rbc'].nunique()} RBC(s).")
 
-    #df = 
     df, df_alertas = aplicar_alertas(df)
 
     df = calcular_score(df)
@@ -439,40 +454,30 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
     df.drop(columns=["limite_cpu_alerta", "limite_cpu_critico", "limite_ram_alerta", "limite_ram_critico", "limite_disco_alerta", "limite_disco_critico", "limite_latencia_alerta", "limite_latencia_critico", "limite_proc_qtd_alerta", "limite_proc_qtd_critico", "limite_proc_sintaxe", "limite_proc_ram_alerta", "limite_proc_ram_critico", "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico", "limite_proc_cpu_alerta", "limite_proc_cpu_critico", "processos","idade_ultima_leitura_minutos", "url_jira", "email_usuario_jira", "token_usuario_jira", "limite_proc_threads_alerta", "limite_proc_threads_critico"], inplace=True)
 
     return df, df_alertas
-def salvar_csv_trusted(df: pd.DataFrame, bucket: str):
+def salvar_csv_trusted(df: pd.DataFrame, bucket: str, tipo: str):
     print("Iniciando processo de salvamento do CSV...")
-
     # Gera o caminho onde o arquivo será salvo no S3
-    caminho = caminho_para_tratado(df=df)
+    caminho = caminho_para_tratado(df=df, tipo=tipo)
     print(f"Caminho gerado para o arquivo: {caminho}")
-
     # Tenta buscar um arquivo já existente no S3
     print("Verificando se já existe arquivo no S3...")
     arquivo = extrair_csv_s3(bucket=bucket, key=caminho)
-
     # Caso já exista arquivo
     if arquivo is not None:
         print("Arquivo existente encontrado!")
-        try:
-            print("Concatenando dataframe antigo com o novo...")
-
-            # Junta os dados antigos com os novos
-            df_novo = pd.concat([arquivo, df], ignore_index=True)
-
-            # Atualiza o dataframe principal
-            df = df_novo
-
-            print("Concatenação realizada com sucesso!")
-            print(f"Quantidade total de linhas após concatenação: {len(df)}")
-
-        except Exception as e:
-            print(f"Erro ao tentar concatenar os dataframes: {e}")
-
+        if tipo != "semanal":
+            try:
+                print("Concatenando dataframe antigo com o novo...")
+                df = juntar_dataframes(df1=arquivo, df2=df)
+                print("Concatenação realizada com sucesso!")
+                print(f"Quantidade total de linhas após concatenação: {len(df)}")
+            except Exception as e:
+                print(f"Erro ao tentar concatenar os dataframes: {e}")
     else:
         print("Nenhum arquivo existente encontrado no S3.")
 
     # Obtém os endereços MAC únicos
-    print("Obtendo endereços MAC únicos...")
+    print("Obtendo endereços MAC únicos para semanal...")
     mac_adress = df["endereco_mac"].dropna().unique()
     mac_adress = mac_adress[0]
 
@@ -495,27 +500,119 @@ def salvar_csv_trusted(df: pd.DataFrame, bucket: str):
     print(f"Enviando arquivo para bucket '{bucket}'...")
     
     # Upload do arquivo para o S3
-    s3.upload_file(
-        Filename=nome_arquivo,
-        Bucket=bucket,
-        Key=caminho
+    try:
+        s3.upload_file(
+            Filename=nome_arquivo,
+            Bucket=bucket,
+            Key=caminho
+        )
+        print("Upload realizado com sucesso!")
+        print("Removendo arquivo local temporário...")
+        print("Arquivo local removido!")
+        return True
+    except Exception as e:
+        print("Erro ao tentar subir o arquivo: ", e)
+    return False
+        
+
+def juntar_dataframes(df1: pd.DataFrame, df2: pd.DataFrame):
+    try:
+        print("Concatenando dataframe antigo com o novo...")
+        df = pd.concat([df1, df2], ignore_index=True)
+        print("Concatenação realizada com sucesso!")
+        print(f"Quantidade total de linhas após concatenação: {len(df)}")
+        return df
+    except Exception as e:
+        print(f"Erro ao tentar concatenar os dataframes: {e}")
+    
+    return None
+        
+def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
+    print("\n" + "=" * 80)
+    print("[SEMANAL] INICIANDO ATUALIZAÇÃO DO ARQUIVO SEMANAL")
+    print("=" * 80)
+
+    print(f"[SEMANAL] Linhas recebidas do dataframe atual: {len(df)}")
+    print(f"[SEMANAL] Colunas recebidas: {list(df.columns)}")
+
+    caminho = caminho_para_tratado(df=df, tipo="semanal")
+    print(f"[SEMANAL] Caminho semanal gerado: s3://{bucket}/{caminho}")
+
+    print("[SEMANAL] Tentando buscar arquivo semanal existente no S3...")
+    arquivo_antigo = extrair_csv_s3(bucket=bucket, key=caminho)
+
+    if arquivo_antigo is not None:
+        print("[SEMANAL] Arquivo semanal antigo encontrado!")
+        print(f"[SEMANAL] Linhas no arquivo antigo: {len(arquivo_antigo)}")
+        print(f"[SEMANAL] Colunas do arquivo antigo: {list(arquivo_antigo.columns)}")
+
+        print("[SEMANAL] Concatenando arquivo antigo + dataframe atual...")
+        df_semanal = juntar_dataframes(df1=arquivo_antigo, df2=df)
+
+        if df_semanal is None:
+            raise ValueError("[SEMANAL] Erro: concatenação retornou None.")
+
+        print(f"[SEMANAL] Linhas após concatenação: {len(df_semanal)}")
+
+    else:
+        print("[SEMANAL] Nenhum arquivo semanal antigo encontrado.")
+        print("[SEMANAL] O semanal será criado apenas com o dataframe atual.")
+        df_semanal = df.copy()
+
+    print("[SEMANAL] Validando coluna de data...")
+
+    if "data_hora_iso" not in df_semanal.columns:
+        raise ValueError(
+            "[SEMANAL] ERRO: coluna 'data_hora_iso' não existe no dataframe semanal."
+        )
+
+    print("[SEMANAL] Convertendo data_hora_iso para datetime...")
+    df_semanal["data_hora_iso"] = pd.to_datetime(
+        df_semanal["data_hora_iso"],
+        errors="coerce"
     )
 
-    print("Upload realizado com sucesso!")
+    datas_invalidas = df_semanal["data_hora_iso"].isna().sum()
+    print(f"[SEMANAL] Datas inválidas após conversão: {datas_invalidas}")
 
-    # Remove arquivo local
-    print("Removendo arquivo local temporário...")
-    os.remove(nome_arquivo)
+    if datas_invalidas > 0:
+        print("[SEMANAL] Removendo linhas com data inválida...")
+        df_semanal = df_semanal.dropna(subset=["data_hora_iso"])
+        print(f"[SEMANAL] Linhas após remover datas inválidas: {len(df_semanal)}")
 
-    print("Arquivo local removido!")
-    print("Processo finalizado com sucesso!")
+    limite = pd.Timestamp.now() - pd.Timedelta(days=7)
+
+    print(f"[SEMANAL] Data/hora atual: {pd.Timestamp.now()}")
+    print(f"[SEMANAL] Limite mínimo para manter no semanal: {limite}")
+
+    antes_filtro = len(df_semanal)
+
+    print("[SEMANAL] Aplicando filtro dos últimos 7 dias...")
+    df_semanal = df_semanal[df_semanal["data_hora_iso"] >= limite]
+
+    depois_filtro = len(df_semanal)
+
+    print(f"[SEMANAL] Linhas antes do filtro: {antes_filtro}")
+    print(f"[SEMANAL] Linhas depois do filtro: {depois_filtro}")
+    print(f"[SEMANAL] Linhas removidas por serem antigas: {antes_filtro - depois_filtro}")
+
+    print("[SEMANAL] Ordenando por data_hora_iso...")
+    df_semanal = df_semanal.sort_values("data_hora_iso")
+
+    if not df_semanal.empty:
+        print(f"[SEMANAL] Primeira data mantida: {df_semanal['data_hora_iso'].min()}")
+        print(f"[SEMANAL] Última data mantida: {df_semanal['data_hora_iso'].max()}")
+        print(f"[SEMANAL] MACs no semanal: {df_semanal['endereco_mac'].dropna().unique().tolist()}")
+    else:
+        print("[SEMANAL] AVISO: dataframe semanal ficou vazio após o filtro.")
+
+    print("[SEMANAL] Atualização semanal finalizada com sucesso.")
+    print("=" * 80 + "\n")
+    return df_semanal
+
 
     
-
-
-
     
-
 def main():
     """
     Execução local para testes sem Lambda.
@@ -529,6 +626,16 @@ def main():
 
     df, df_alertas = extrair_e_enriquecer(bucket=bucket, key=key)
 
+    df_semanal = atualizar_semanal(bucket=bucket, df=df)
+
+    if not df_alertas.empty:
+        print("\nRegistros de alerta gerados:")
+        print(df_alertas[["nome_rbc", "componente_afetado", "tipo_alerta", "valor_medido", "limite_atencao", "limite_critico"]].to_string(index=False))
+        salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")
+
+    salvar_csv_trusted(bucket=bucket, df=df_semanal,tipo="semanal")
+    salvar_csv_trusted(df=df, bucket=bucket, tipo="tratado")
+    
 
     print("\n" + "=" * 60)
     print("Resumo — DataFrame tratado")
@@ -542,12 +649,6 @@ def main():
     print(f"Alertas ATENÇÃO   : {int(df['qte_alertas_atencao'].sum())}")
     print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
     print("=" * 60)
-
-    if not df_alertas.empty:
-        print("\nRegistros de alerta gerados:")
-        print(df_alertas[["nome_rbc", "componente_afetado", "tipo_alerta", "valor_medido", "limite_atencao", "limite_critico"]].to_string(index=False))
-
-    salvar_csv_trusted(df=df, bucket=bucket)
 
 
 if __name__ == "__main__":

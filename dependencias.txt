@@ -1,0 +1,7 @@
+boto3
+dotenv 
+psutil
+pandas
+colorama
+mysql-connector-python
+numpy
