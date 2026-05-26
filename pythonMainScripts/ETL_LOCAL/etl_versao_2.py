@@ -171,7 +171,6 @@ def dashboardOperacao(df: pd.DataFrame):
 def main():
     bucket = os.getenv("S3_BUCKET")
     df_principal_tratado, df_principal_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
-
     df_principal_alertas.to_csv("df_principal_alertas.csv", index=False)
     df_principal_tratado.to_csv("df_principal_tratado.csv", index=False)
 

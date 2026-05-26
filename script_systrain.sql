@@ -11,11 +11,14 @@ CREATE TABLE empresa (
     cnpj VARCHAR(40) UNIQUE,
     email VARCHAR(100),
     telefone VARCHAR(15) DEFAULT NULL,
+    url_jira VARCHAR(200),
+	email_usuario_jira VARCHAR(200),
+	token_usuario_jira VARCHAR(200),
     PRIMARY KEY (idEmpresa)
 );
-
+INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefoneurl_jira, email_usuario_jira, token_usuario_jira) VALUES
+('Via Paulista Mobilidade', 'VPMB1234A1', DEFAULT, '12345678000101', 'contato@viapaulista.com', '11987654321', '', '', '');
 INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefone) VALUES
-('Via Paulista Mobilidade', 'VPMB1234A1', DEFAULT, '12345678000101', 'contato@viapaulista.com', '11987654321'),
 ('Ferrovia Bandeirante S.A.', 'FBSA5678B2', DEFAULT, '12345678000102', 'suporte@ferrobandeirante.com', '11987654322'),
 ('Rota Trilhos Tecnologia', 'RTTC9012C3', DEFAULT, '12345678000103', 'atendimento@rotatrilhos.com', '11987654323');
 
@@ -53,9 +56,9 @@ INSERT INTO rbc (idRbc, nomeServidor, macAdress, objetivoFinanceiro, fkLinha) VA
 (1,'SV-PRIM','81:09:80:5a:9c:47', 100.0,1),
 (2,'SV-MHRT','c4:8b:08:05:ff:b6', 1100.0, 2),
 (3,'SV-JOKT','13:47:52:e1:8a:7f', 1500.0, 2),
-(4,'RB_ALPH','50:b3:63:01:79:02', 1902.9, 5),
+(4,'RB_ALPH','0c-cc-47-e3-5f-90', 1902.9, 5),
 (5,'RB_BETA','06:71:a3:c2:10:07', 1900.9, 4),
-(6,'RB_KAIO','08:00:27:3e:8d:d0', 1500.10, 5);
+(6,'RB_KAIO','50-b3-63-01-79-02', 1500.10, 5);
 
 CREATE TABLE componente (
     idComponente INT AUTO_INCREMENT,
