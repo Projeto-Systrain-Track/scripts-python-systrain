@@ -130,36 +130,35 @@ def buscar_mapeamento_rbc(mac_adress: list[str]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-
 def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
     """
-    Busca no banco os limites de alerta e crItico de cada componente
+    Busca no banco os limites de alerta e crítico de cada componente
     para os RBCs informados.
-
-    Retorna um DataFrame com uma linha por id_rbc e uma coluna por limite.
-    RBCs sem nenhum componente cadastrado não aparecem no resultado.
     """
-    try: 
-        id_formatado = float(id_rbc[0])
-    except ValueError:
-        print("Erro: id_rbc não é do tipo number")
 
-    if not id_formatado:
+    ids_validos = pd.to_numeric(pd.Series(id_rbc), errors="coerce").dropna().astype(int).unique().tolist()
+
+    if not ids_validos:
+        print("[banco] AVISO — nenhum id_rbc numérico válido para buscar limites.")
         return pd.DataFrame()
 
     conn = conexao_mysql()
     try:
         cursor = conn.cursor(dictionary=True)
-        sql = """
+
+        placeholders = ",".join(["%s"] * len(ids_validos))
+
+        sql = f"""
             SELECT
                 rc.fkRbc     AS id_rbc,
                 c.nome       AS codigo_componente,
                 rc.definicao AS definicao
             FROM rbcComponente rc
             JOIN componente c ON c.idComponente = rc.fkComponente
-            WHERE rc.fkRbc = %s
+            WHERE rc.fkRbc IN ({placeholders})
         """
-        cursor.execute(sql, (id_formatado,))
+
+        cursor.execute(sql, ids_validos)
         resultado_select = cursor.fetchall()
     finally:
         conn.close()
@@ -178,23 +177,26 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
         "PRS_NUM":     ("limite_proc_qtd_alerta", "limite_proc_qtd_critico"),
         "PRS_RAM_USE": ("limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico"),
     }
-    resultado: dict = {}
-    for linha in resultado_select:
-        id_rbc = linha["id_rbc"]
-        codigo = linha["codigo_componente"]
-        definicao_dicionario   = separar_definicao(linha["definicao"])
 
-        if id_rbc not in resultado:
-            resultado[id_rbc] = {
-                "id_rbc": id_rbc
+    resultado = {}
+
+    for linha in resultado_select:
+        id_rbc_linha = linha["id_rbc"]
+        codigo = linha["codigo_componente"]
+        definicao_dicionario = separar_definicao(linha["definicao"])
+
+        if id_rbc_linha not in resultado:
+            resultado[id_rbc_linha] = {
+                "id_rbc": id_rbc_linha
             }
+
         if codigo in mapa_colunas:
             coluna_atencao, coluna_critico = mapa_colunas[codigo]
-            resultado[id_rbc][coluna_atencao] = definicao_dicionario.get("limite_alerta")
-            resultado[id_rbc][coluna_critico] = definicao_dicionario.get("limite_critico")
+            resultado[id_rbc_linha][coluna_atencao] = definicao_dicionario.get("limite_alerta")
+            resultado[id_rbc_linha][coluna_critico] = definicao_dicionario.get("limite_critico")
 
         elif codigo == "PRS_STX":
-            resultado[id_rbc]["limite_proc_sintaxe"] = definicao_dicionario.get("valor")
+            resultado[id_rbc_linha]["limite_proc_sintaxe"] = definicao_dicionario.get("valor")
 
     return pd.DataFrame(resultado.values())
 
@@ -212,17 +214,22 @@ def classificar_alerta(valor: float, limite_atencao: Any, limite_critico: Any):
     return None, 0
 
 def retornar_motivo_alerta(nome_coluna, status, limite):
-    mensagem = ""
+    motivo_descricao = ""
+    motivo_resumido = ""
     if nome_coluna == "percentual_uso_cpu":
-        mensagem = f"Percentual de CPU acima de {limite}% "
+        motivo_descricao = f"Percentual de CPU acima de {limite}% "
+        motivo_resumido = f"CPU acima de {limite}% "
     elif nome_coluna == "percentual_uso_ram":
-        mensagem = f"Percentual de RAM acima de {limite}% "
+        motivo_descricao = f"Percentual de RAM acima de {limite}% "
+        motivo_resumido = f"RAM acima de {limite}% "
     elif nome_coluna == "percentual_uso_disco":
-        mensagem = f"Percentual de DISCO acima de {limite}% "
+        motivo_descricao = f"Percentual de DISCO acima de {limite}% "
+        motivo_resumido = f"DISCO acima de {limite}% "
     elif nome_coluna == "latencia_ping_ms":
-        mensagem = f"Percentual de LATENCIA acima de {limite}ms "
+        motivo_descricao = f"Percentual de LATENCIA acima de {limite}ms "
+        motivo_resumido = f"LATENCIA acima de {limite}ms "
 
-    return mensagem
+    return motivo_descricao, motivo_resumido
     
     
 
@@ -234,7 +241,6 @@ def aplicar_alertas(df: pd.DataFrame):
             "percentual_uso_disco": ("limite_disco_alerta", "limite_disco_critico"),
             "latencia_ping_ms": ("limite_latencia_alerta", "limite_latencia_critico")
     }
-
     alertas_gerados = []
     qte_alertas_criticos = 0
     qte_alertas_atencao = 0
@@ -251,7 +257,7 @@ def aplicar_alertas(df: pd.DataFrame):
             if status_alerta is None:
                 continue
             else:
-
+                motivo_descricao, motivo_resumo = retornar_motivo_alerta(nome_coluna=nome_coluna, status=status_alerta, limite=limite_usado)
                 alertas_gerados.append(
                     {
                         "id_empresa": linha.id_empresa,
@@ -265,7 +271,8 @@ def aplicar_alertas(df: pd.DataFrame):
                         "valor_medido": valor_captura,
                         "componente_afetado": limites[0].split("_")[1],
                         "tipo_alerta": status_alerta,
-                        "motivo_alerta": retornar_motivo_alerta(nome_coluna=nome_coluna, status=status_alerta, limite=limite_usado), 
+                        "motivo_alerta": motivo_descricao, 
+                        "motivo_resumido": motivo_resumo, 
                         "data_hora_iso": linha.data_hora_iso,
                         "limite_atencao": limite_atencao,
                         "limite_critico": limite_critico,
@@ -287,14 +294,13 @@ def aplicar_alertas(df: pd.DataFrame):
                     qte_alertas_disco += 1
                 elif nome_coluna == "latencia_ping_ms":
                     qte_alertas_latencia += 1
-                    
-                    
-    df["qte_alertas_cpu"] = qte_alertas_criticos
-    df["qte_alertas_ram"] = qte_alertas_criticos
-    df["qte_alertas_disco"] = qte_alertas_criticos
-    df["qte_alertas_latencia"] = qte_alertas_criticos
+
     df["qte_alertas_critico"] = qte_alertas_criticos
     df["qte_alertas_atencao"] = qte_alertas_atencao
+    df["qte_alertas_cpu"] = qte_alertas_cpu
+    df["qte_alertas_ram"] = qte_alertas_ram
+    df["qte_alertas_disco"] = qte_alertas_disco
+    df["qte_alertas_latencia"] = qte_alertas_latencia
     alertas_gerados = pd.DataFrame(alertas_gerados)
     alertas_gerados.to_csv("alertas.csv", index=False)
     return df, alertas_gerados
@@ -378,82 +384,86 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
         caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/abertos/{mac_adress}.csv"
     elif tipo == "tratado":
         caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/tratados/{mac_adress}.csv"
-    elif tipo == "semanal":
-        caminho = f"trusted/{nome_empresa}/semanal/{mac_adress}.csv"
+    elif tipo == "semanal-tratados":
+        caminho = f"trusted/{nome_empresa}/semanal/tratados/{mac_adress}.csv"
+    elif tipo == "semanal-alertas":
+        caminho = f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
     return caminho
 
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = extrair_csv_s3(bucket=bucket, key=key)
-    mac_adress_servidor = df["endereco_mac"].dropna().unique().tolist()
-    print(f"[banco] Buscando mapeamento para {len(mac_adress_servidor)} MAC(s)...")
+    if df is not None:
+        mac_adress_servidor = df["endereco_mac"].dropna().unique().tolist()
+        print(f"[banco] Buscando mapeamento para {len(mac_adress_servidor)} MAC(s)...")
 
-    mapeamento = buscar_mapeamento_rbc(mac_adress_servidor)
+        mapeamento = buscar_mapeamento_rbc(mac_adress_servidor)
 
-    sem_cadastro = set(mac_adress_servidor) - set(mapeamento["endereco_mac"].tolist())
-    if sem_cadastro:
-        print(f"[banco] AVISO — MACs sem cadastro: {sem_cadastro}")
+        sem_cadastro = set(mac_adress_servidor) - set(mapeamento["endereco_mac"].tolist())
+        if sem_cadastro:
+            print(f"[banco] AVISO — MACs sem cadastro: {sem_cadastro}")
 
-    df = df.merge(mapeamento, on="endereco_mac", how="left")
+        df = df.merge(mapeamento, on="endereco_mac", how="left")
 
-    df["nome_empresa"] = df["nome_empresa"].fillna("SEM_EMPRESA")
-    df["nome_linha"] = df["nome_linha"].fillna("SEM_LINHA")
-    df["id_rbc"] = df["id_rbc"].fillna(df["endereco_mac"])
-    df["nome_rbc"] = df["nome_rbc"].fillna(df["endereco_mac"])
+        df["nome_empresa"] = df["nome_empresa"].fillna("SEM_EMPRESA")
+        df["nome_linha"] = df["nome_linha"].fillna("SEM_LINHA")
+        df["id_rbc"] = df["id_rbc"].fillna(df["endereco_mac"])
+        df["nome_rbc"] = df["nome_rbc"].fillna(df["endereco_mac"])
 
-    print(f"[banco] Buscando limites para {df["id_rbc"].dropna().unique()} RBC(s)...")
-    
-    tabela_limites = buscar_limites_rbc(df["id_rbc"].dropna().unique())
+        print(f"[banco] Buscando limites para {df["id_rbc"].dropna().unique()} RBC(s)...")
+        
+        tabela_limites = buscar_limites_rbc(df["id_rbc"].dropna().unique())
+        if tabela_limites.empty:
+            # Sem limites cadastrados — colunas ficam NaN, alertas ficam None
+            print("[banco] AVISO — nenhum limite encontrado. Alertas não serão gerados.")
+            colunas_limite = [
+                "limite_cpu_alerta", "limite_cpu_critico",
+                "limite_ram_alerta", "limite_ram_critico",
+                "limite_disco_alerta", "limite_disco_critico",
+                "limite_latencia_alerta", "limite_latencia_critico",
+                "limite_proc_cpu_alerta", "limite_proc_cpu_critico",
+                "limite_proc_ram_alerta", "limite_proc_ram_critico",
+                "limite_proc_threads_alerta", "limite_proc_threads_critico",
+                "limite_proc_qtd_alerta", "limite_proc_qtd_critico",
+                "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico",
+                "limite_proc_sintaxe"
+            ]
+            for col in colunas_limite:
+                df[col] = np.nan
+        else:
+            tabela_limites["id_rbc"] = pd.to_numeric(tabela_limites["id_rbc"], errors="coerce")
+            df["_id_rbc_num"] = pd.to_numeric(df["id_rbc"], errors="coerce")
 
-    if tabela_limites.empty:
-        # Sem limites cadastrados — colunas ficam NaN, alertas ficam None
-        print("[banco] AVISO — nenhum limite encontrado. Alertas não serão gerados.")
-        colunas_limite = [
-            "limite_cpu_alerta", "limite_cpu_critico",
-            "limite_ram_alerta", "limite_ram_critico",
-            "limite_disco_alerta", "limite_disco_critico",
-            "limite_latencia_alerta", "limite_latencia_critico",
-            "limite_proc_cpu_alerta", "limite_proc_cpu_critico",
-            "limite_proc_ram_alerta", "limite_proc_ram_critico",
-            "limite_proc_threads_alerta", "limite_proc_threads_critico",
-            "limite_proc_qtd_alerta", "limite_proc_qtd_critico",
-            "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico",
-            "limite_proc_sintaxe"
-        ]
-        for col in colunas_limite:
-            df[col] = np.nan
-    else:
-        tabela_limites["id_rbc"] = pd.to_numeric(tabela_limites["id_rbc"], errors="coerce")
-        df["_id_rbc_num"] = pd.to_numeric(df["id_rbc"], errors="coerce")
+            df = df.merge(
+                tabela_limites,
+                left_on="_id_rbc_num",
+                right_on="id_rbc",
+                how="left",
+                suffixes=("", "_lim"),
+            )
+            # Remove colunas auxiliares do merge
+            df.drop(columns=["_id_rbc_num", "id_rbc_lim"], errors="ignore", inplace=True)
+            print(f"[banco] Limites aplicados para {tabela_limites['id_rbc'].nunique()} RBC(s).")
 
-        df = df.merge(
-            tabela_limites,
-            left_on="_id_rbc_num",
-            right_on="id_rbc",
-            how="left",
-            suffixes=("", "_lim"),
-        )
-        # Remove colunas auxiliares do merge
-        df.drop(columns=["_id_rbc_num", "id_rbc_lim"], errors="ignore", inplace=True)
-        print(f"[banco] Limites aplicados para {tabela_limites['id_rbc'].nunique()} RBC(s).")
+        df, df_alertas = aplicar_alertas(df)
 
-    df, df_alertas = aplicar_alertas(df)
+        df = calcular_score(df)
 
-    df = calcular_score(df)
-
-    df = aplicar_status_online(df)
+        df = aplicar_status_online(df)
 
 
-    if df_alertas.empty:
-        print("[alertas] Nenhum alerta nesta leitura.")
-    else:
-        print(
-            f"[alertas] {len(df_alertas)} alerta(s) gerado(s): "
-            f"{df_alertas['tipo_alerta'].value_counts().to_dict()}"
-        )
+        if df_alertas.empty:
+            print("[alertas] Nenhum alerta nesta leitura.")
+        else:
+            print(
+                f"[alertas] {len(df_alertas)} alerta(s) gerado(s): "
+                f"{df_alertas['tipo_alerta'].value_counts().to_dict()}"
+            )
 
-    df.drop(columns=["limite_cpu_alerta", "limite_cpu_critico", "limite_ram_alerta", "limite_ram_critico", "limite_disco_alerta", "limite_disco_critico", "limite_latencia_alerta", "limite_latencia_critico", "limite_proc_qtd_alerta", "limite_proc_qtd_critico", "limite_proc_sintaxe", "limite_proc_ram_alerta", "limite_proc_ram_critico", "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico", "limite_proc_cpu_alerta", "limite_proc_cpu_critico", "processos","idade_ultima_leitura_minutos", "url_jira", "email_usuario_jira", "token_usuario_jira", "limite_proc_threads_alerta", "limite_proc_threads_critico"], inplace=True)
+        df.drop(columns=["limite_cpu_alerta", "limite_cpu_critico", "limite_ram_alerta", "limite_ram_critico", "limite_disco_alerta", "limite_disco_critico", "limite_latencia_alerta", "limite_latencia_critico", "limite_proc_qtd_alerta", "limite_proc_qtd_critico", "limite_proc_sintaxe", "limite_proc_ram_alerta", "limite_proc_ram_critico", "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico", "limite_proc_cpu_alerta", "limite_proc_cpu_critico", "processos","idade_ultima_leitura_minutos", "url_jira", "email_usuario_jira", "token_usuario_jira", "limite_proc_threads_alerta", "limite_proc_threads_critico"], inplace=True)
 
-    return df, df_alertas
+        return df, df_alertas
+    return None, None
+
 def salvar_csv_trusted(df: pd.DataFrame, bucket: str, tipo: str):
     print("Iniciando processo de salvamento do CSV...")
     # Gera o caminho onde o arquivo será salvo no S3
@@ -535,7 +545,7 @@ def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
     print(f"[SEMANAL] Linhas recebidas do dataframe atual: {len(df)}")
     print(f"[SEMANAL] Colunas recebidas: {list(df.columns)}")
 
-    caminho = caminho_para_tratado(df=df, tipo="semanal")
+    caminho = caminho_para_tratado(df=df, tipo="semanal-tratados")
     print(f"[SEMANAL] Caminho semanal gerado: s3://{bucket}/{caminho}")
 
     print("[SEMANAL] Tentando buscar arquivo semanal existente no S3...")
@@ -625,31 +635,28 @@ def main():
         raise ValueError("Defina S3_BUCKET e S3_KEY no .env para execução local.")
 
     df, df_alertas = extrair_e_enriquecer(bucket=bucket, key=key)
-
-    df_semanal = atualizar_semanal(bucket=bucket, df=df)
-
-    if not df_alertas.empty:
+    if df is not None:
+        df_semanal = atualizar_semanal(bucket=bucket, df=df)
+        salvar_csv_trusted(bucket=bucket, df=df_semanal,tipo="semanal-tratados")
+        salvar_csv_trusted(df=df, bucket=bucket, tipo="tratado")
+        print("\n" + "=" * 60)
+        print("Resumo — DataFrame tratado")
+        print("=" * 60)
+        print(f"Linhas            : {len(df):,}")
+        print(f"Colunas           : {len(df.columns)}")
+        print(f"Empresas          : {df['id_empresa'].nunique(dropna=False)}")
+        print(f"Linhas de produção: {df['id_linha'].nunique(dropna=False)}")
+        print(f"RBCs              : {df['id_rbc'].nunique(dropna=False)}")
+        print(f"AlertIs CRITICO   : {int(df['qte_alertas_critico'].sum())}")
+        print(f"Alertas ATENÇÃO   : {int(df['qte_alertas_atencao'].sum())}")
+        print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
+        print("=" * 60)
+        
+    if df_alertas is not None :
         print("\nRegistros de alerta gerados:")
         print(df_alertas[["nome_rbc", "componente_afetado", "tipo_alerta", "valor_medido", "limite_atencao", "limite_critico"]].to_string(index=False))
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")
-
-    salvar_csv_trusted(bucket=bucket, df=df_semanal,tipo="semanal")
-    salvar_csv_trusted(df=df, bucket=bucket, tipo="tratado")
-    
-
-    print("\n" + "=" * 60)
-    print("Resumo — DataFrame tratado")
-    print("=" * 60)
-    print(f"Linhas            : {len(df):,}")
-    print(f"Colunas           : {len(df.columns)}")
-    print(f"Empresas          : {df['id_empresa'].nunique(dropna=False)}")
-    print(f"Linhas de produção: {df['id_linha'].nunique(dropna=False)}")
-    print(f"RBCs              : {df['id_rbc'].nunique(dropna=False)}")
-    print(f"AlertIs CRITICO   : {int(df['qte_alertas_critico'].sum())}")
-    print(f"Alertas ATENÇÃO   : {int(df['qte_alertas_atencao'].sum())}")
-    print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
-    print("=" * 60)
-
+        salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="semanal-alertas")
 
 if __name__ == "__main__":
     main()
