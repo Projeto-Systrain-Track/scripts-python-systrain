@@ -16,12 +16,15 @@ CREATE TABLE empresa (
 	token_usuario_jira VARCHAR(200),
     PRIMARY KEY (idEmpresa)
 );
-INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefoneurl_jira, email_usuario_jira, token_usuario_jira) VALUES
+INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefone, url_jira, email_usuario_jira, token_usuario_jira) VALUES
 ('Via Paulista Mobilidade', 'VPMB1234A1', DEFAULT, '12345678000101', 'contato@viapaulista.com', '11987654321', '', '', '');
-INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefone) VALUES
-('Ferrovia Bandeirante S.A.', 'FBSA5678B2', DEFAULT, '12345678000102', 'suporte@ferrobandeirante.com', '11987654322'),
-('Rota Trilhos Tecnologia', 'RTTC9012C3', DEFAULT, '12345678000103', 'atendimento@rotatrilhos.com', '11987654323');
 
+
+INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefone) VALUES
+('Ferrovia Bandeirante S.A.', 'FBSA5678B2', DEFAULT, '12345678000102', 'suporte@ferrobandeirante.com', '11987654322');
+
+INSERT INTO empresa (razaoSocial, token, dataCadastro, cnpj, email, telefone, url_jira, email_usuario_jira, token_usuario_jira) VALUES
+('Rota Trilhos Tecnologia', 'RTTC9012C3', DEFAULT, '12345678000103', 'atendimento@rotatrilhos.com', '11987654323', '','','');
 
 CREATE TABLE linha (
     idLinha INT AUTO_INCREMENT,
@@ -122,7 +125,6 @@ INSERT INTO usuario (nome, email, senha, fkEmpresa, tipoUsuario) VALUES
 ('Alvares Tino', 'alvares.tino@rotatrilhos.com', '12345', 3, "Operador"),
 ('Thiago Alves', 'thiago.alves@rotatrilhos.com', '12345', 3, "Gerente de operações"),
 ('Amanda Castro', 'amanda.castro@rotatrilhos.com', '12345', 3, "Coordenador de incidentes");
-
 
 CREATE TABLE rbcComponente (
     fkRbc INT,

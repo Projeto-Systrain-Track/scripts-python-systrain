@@ -396,6 +396,7 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
     print("[dashboardOperacao] Arquivo df_tratado.csv salvo.")
 
     resultado = {}
+    
 
     # Agrupa por empresa para montar o JSON final
     for (id_empresa, nome_empresa), df_tratado_empresa in df_tratado.groupby(["id_empresa", "nome_empresa"]):
@@ -403,9 +404,10 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
 
         custo_empresa = df_tratado_empresa["custo_desperdicado"].sum()
         print("[dashboardOperacao] Custo total da empresa:", custo_empresa)
-
+        
         resultado[id_empresa] = {
             "nome": nome_empresa,
+            "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
             "custo_total_semana": float(custo_empresa),
             "custo_por_dia": {},
             "linhas": {},
@@ -496,7 +498,7 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
         for (id_empresa, nome_empresa), df_empresa_alertas in df_alertas.groupby(["id_empresa", "nome_empresa"]):
             print(f"[dashboardOperacao] Alertas da empresa {id_empresa} - {nome_empresa}")
             resultado[id_empresa]["alertas_por_motivo"] = (
-                df_empresa_alertas["componente_afetado"]
+                df_empresa_alertas["motivo_resumido"]
                 .value_counts()
                 .to_dict()
             )
@@ -517,7 +519,7 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
 
                 # Custo por dia da linha
                 resultado[id_empresa]["linhas"][id_linha]["alertas_por_motivo"] = (
-                    df_linha_alertas["componente_afetado"]
+                    df_linha_alertas["motivo_resumido"]
                     .value_counts()
                     .to_dict()
                 )
@@ -542,11 +544,11 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
                     print(f"[dashboardOperacao] RBC {id_rbc} - {nome_rbc} | Alertas {qte_alertas_rbc}")
                     resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["qte_alertas"] = float(qte_alertas_rbc)
                     resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["alertas_por_motivo"] = (
-                        df_rbc_alertas["componente_afetado"]
+                        df_rbc_alertas["motivo_resumido"]
                         .value_counts()
                         .to_dict()
                     )                                  
-    bucket = os.getenv("S3_BUCKET")                
+    bucket = os.getenv("S3_BUCKET")   
     salvar_json_client(json_dashboard=resultado, bucket=bucket, tipo="operacao")
 
 
