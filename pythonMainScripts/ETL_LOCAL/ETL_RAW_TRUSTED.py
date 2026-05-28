@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from io import BytesIO
 from typing import Any, Optional
@@ -18,6 +19,12 @@ LIMITE_OFFLINE_MINUTOS = 10
 PESO_CPU = 0.4
 PESO_RAM = 0.4
 PESO_DISCO = 0.2
+
+CFG = {
+    "last_n": 10,  # quantas últimas leituras incluir por RBC no JSON
+}
+
+
 def cfg_mysql() -> dict:
     """Lê credenciais do MySQL a partir de variáveis de ambiente."""
     return {
@@ -38,9 +45,11 @@ def cfg_s3() -> dict:
         "aws_session_token":     os.getenv("AWS_SESSION_TOKEN"),
     }
 
+
 def conexao_mysql():
     """Abre e retorna uma conexão MySQL. Sempre fechar no finally."""
     return mysql.connector.connect(**cfg_mysql())
+
 
 def limpar_mac(valor: Any) -> Any:
     """Normaliza endereço MAC: lowercase e sem espaços."""
@@ -72,13 +81,37 @@ def separar_definicao(definicao: Any) -> dict:
             resultado[chave.strip()] = valor.strip()
     return resultado
 
+
+def native(valor: Any) -> Any:
+    """
+    Converte tipos NumPy/Pandas para tipos nativos Python,
+    garantindo que o json.dumps não quebre.
+    Retorna None para NaN/NaT/pd.NA.
+    """
+    if valor is None:
+        return None
+    if isinstance(valor, float) and np.isnan(valor):
+        return None
+    if isinstance(valor, (np.integer,)):
+        return int(valor)
+    if isinstance(valor, (np.floating,)):
+        return float(valor)
+    if isinstance(valor, (np.bool_,)):
+        return bool(valor)
+    if isinstance(valor, pd.Timestamp):
+        return valor.isoformat() if not pd.isna(valor) else None
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return valor
+
+
 def calcular_score(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calcula um score de saúde (0–100) como média ponderada de CPU, RAM e Disco.
     Quanto maior o score, maior a pressão sobre o hardware.
-
-    Usado no dashboard para ordenar servidores por criticidade
-    e no gráfico de linha de saúde ao longo do dia.
     """
     df["score_saude"] = (
           df["percentual_uso_cpu"].fillna(0)   * PESO_CPU
@@ -86,6 +119,7 @@ def calcular_score(df: pd.DataFrame) -> pd.DataFrame:
         + df["percentual_uso_disco"].fillna(0) * PESO_DISCO
     )
     return df
+
 
 def buscar_mapeamento_rbc(mac_adress: list[str]) -> pd.DataFrame:
     if not mac_adress:
@@ -104,7 +138,7 @@ def buscar_mapeamento_rbc(mac_adress: list[str]) -> pd.DataFrame:
                 e.idEmpresa AS id_empresa,
                 e.razaoSocial AS nome_empresa,
                 e.url_jira,
-                e.email_usuario_jira, 
+                e.email_usuario_jira,
                 e.token_usuario_jira,
                 l.idLinha AS id_linha,
                 CONCAT('Linha ', l.idLinha) AS nome_linha,
@@ -135,7 +169,6 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
     Busca no banco os limites de alerta e crítico de cada componente
     para os RBCs informados.
     """
-
     ids_validos = pd.to_numeric(pd.Series(id_rbc), errors="coerce").dropna().astype(int).unique().tolist()
 
     if not ids_validos:
@@ -145,9 +178,7 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
     conn = conexao_mysql()
     try:
         cursor = conn.cursor(dictionary=True)
-
         placeholders = ",".join(["%s"] * len(ids_validos))
-
         sql = f"""
             SELECT
                 rc.fkRbc     AS id_rbc,
@@ -157,7 +188,6 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
             JOIN componente c ON c.idComponente = rc.fkComponente
             WHERE rc.fkRbc IN ({placeholders})
         """
-
         cursor.execute(sql, ids_validos)
         resultado_select = cursor.fetchall()
     finally:
@@ -186,9 +216,7 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
         definicao_dicionario = separar_definicao(linha["definicao"])
 
         if id_rbc_linha not in resultado:
-            resultado[id_rbc_linha] = {
-                "id_rbc": id_rbc_linha
-            }
+            resultado[id_rbc_linha] = {"id_rbc": id_rbc_linha}
 
         if codigo in mapa_colunas:
             coluna_atencao, coluna_critico = mapa_colunas[codigo]
@@ -200,11 +228,10 @@ def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
 
     return pd.DataFrame(resultado.values())
 
+
 def classificar_alerta(valor: float, limite_atencao: Any, limite_critico: Any):
     try:
-        
         v = float(valor)
-        # CrItico tem prioridade sobre atenção
         if limite_critico is not None and v >= float(limite_critico):
             return "CRITICO", limite_critico
         if limite_atencao is not None and v >= float(limite_atencao):
@@ -212,6 +239,7 @@ def classificar_alerta(valor: float, limite_atencao: Any, limite_critico: Any):
     except (TypeError, ValueError):
         pass
     return None, 0
+
 
 def retornar_motivo_alerta(nome_coluna, status, limite):
     motivo_descricao = ""
@@ -228,95 +256,86 @@ def retornar_motivo_alerta(nome_coluna, status, limite):
     elif nome_coluna == "latencia_ping_ms":
         motivo_descricao = f"Percentual de LATENCIA acima de {limite}ms "
         motivo_resumido = f"LATENCIA acima de {limite}ms "
-
     return motivo_descricao, motivo_resumido
-    
-    
 
 
 def aplicar_alertas(df: pd.DataFrame):
     colunas_limite = {
-            "percentual_uso_cpu": ("limite_cpu_alerta", "limite_cpu_critico"),
-            "percentual_uso_ram": ("limite_ram_alerta", "limite_ram_critico"),
-            "percentual_uso_disco": ("limite_disco_alerta", "limite_disco_critico"),
-            "latencia_ping_ms": ("limite_latencia_alerta", "limite_latencia_critico")
+        "percentual_uso_cpu":   ("limite_cpu_alerta",      "limite_cpu_critico"),
+        "percentual_uso_ram":   ("limite_ram_alerta",      "limite_ram_critico"),
+        "percentual_uso_disco": ("limite_disco_alerta",    "limite_disco_critico"),
+        "latencia_ping_ms":     ("limite_latencia_alerta", "limite_latencia_critico"),
     }
     alertas_gerados = []
     qte_alertas_criticos = 0
     qte_alertas_atencao = 0
-    qte_alertas_cpu = 0 
-    qte_alertas_ram = 0 
-    qte_alertas_disco = 0 
-    qte_alertas_latencia = 0 
+    qte_alertas_cpu = 0
+    qte_alertas_ram = 0
+    qte_alertas_disco = 0
+    qte_alertas_latencia = 0
+
     for linha in df.itertuples():
         for nome_coluna, limites in colunas_limite.items():
-            valor_captura = getattr(linha, nome_coluna)
-            limite_atencao = getattr(linha, limites[0])
-            limite_critico = getattr(linha, limites[1])
+            valor_captura = getattr(linha, nome_coluna, None)
+            limite_atencao = getattr(linha, limites[0], None)
+            limite_critico = getattr(linha, limites[1], None)
             status_alerta, limite_usado = classificar_alerta(valor_captura, limite_atencao, limite_critico)
             if status_alerta is None:
                 continue
+            motivo_descricao, motivo_resumo = retornar_motivo_alerta(
+                nome_coluna=nome_coluna, status=status_alerta, limite=limite_usado
+            )
+            alertas_gerados.append({
+                "id_empresa":          linha.id_empresa,
+                "nome_empresa":        linha.nome_empresa,
+                "id_linha":            linha.id_linha,
+                "nome_linha":          linha.nome_linha,
+                "id_rbc":              linha.id_rbc,
+                "nome_rbc":            linha.nome_rbc,
+                "endereco_mac":        linha.endereco_mac,
+                "campo_alerta":        nome_coluna,
+                "valor_medido":        valor_captura,
+                "componente_afetado":  limites[0].split("_")[1],
+                "tipo_alerta":         status_alerta,
+                "motivo_alerta":       motivo_descricao,
+                "motivo_resumido":     motivo_resumo,
+                "data_hora_iso":       linha.data_hora_iso,
+                "limite_atencao":      limite_atencao,
+                "limite_critico":      limite_critico,
+                "url_jira":            linha.url_jira,
+                "email_usuario_jira":  linha.email_usuario_jira,
+                "token_usuario_jira":  linha.token_usuario_jira,
+            })
+            if status_alerta == "CRITICO":
+                qte_alertas_criticos += 1
             else:
-                motivo_descricao, motivo_resumo = retornar_motivo_alerta(nome_coluna=nome_coluna, status=status_alerta, limite=limite_usado)
-                alertas_gerados.append(
-                    {
-                        "id_empresa": linha.id_empresa,
-                        "nome_empresa": linha.nome_empresa,
-                        "id_linha": linha.id_linha,
-                        "nome_linha":   linha.nome_linha,
-                        "id_rbc": linha.id_rbc,
-                        "nome_rbc": linha.nome_rbc,
-                        "endereco_mac": linha.endereco_mac,
-                        "campo_alerta": nome_coluna,
-                        "valor_medido": valor_captura,
-                        "componente_afetado": limites[0].split("_")[1],
-                        "tipo_alerta": status_alerta,
-                        "motivo_alerta": motivo_descricao, 
-                        "motivo_resumido": motivo_resumo, 
-                        "data_hora_iso": linha.data_hora_iso,
-                        "limite_atencao": limite_atencao,
-                        "limite_critico": limite_critico,
-                        "url_jira": linha.url_jira,
-                        "email_usuario_jira": linha.email_usuario_jira,
-                        "token_usuario_jira": linha.token_usuario_jira
-                    }
-                )
-                if status_alerta == "CRITICO":
-                    qte_alertas_criticos+=1
-                else:
-                    qte_alertas_atencao+=1
+                qte_alertas_atencao += 1
 
-                if nome_coluna == "percentual_uso_cpu":
-                    qte_alertas_cpu += 1
-                elif nome_coluna == "percentual_uso_ram":
-                    qte_alertas_ram += 1
-                elif nome_coluna == "percentual_uso_disco":
-                    qte_alertas_disco += 1
-                elif nome_coluna == "latencia_ping_ms":
-                    qte_alertas_latencia += 1
+            if nome_coluna == "percentual_uso_cpu":
+                qte_alertas_cpu += 1
+            elif nome_coluna == "percentual_uso_ram":
+                qte_alertas_ram += 1
+            elif nome_coluna == "percentual_uso_disco":
+                qte_alertas_disco += 1
+            elif nome_coluna == "latencia_ping_ms":
+                qte_alertas_latencia += 1
 
-    df["qte_alertas_critico"] = qte_alertas_criticos
-    df["qte_alertas_atencao"] = qte_alertas_atencao
-    df["qte_alertas_cpu"] = qte_alertas_cpu
-    df["qte_alertas_ram"] = qte_alertas_ram
-    df["qte_alertas_disco"] = qte_alertas_disco
+    df["qte_alertas_critico"]  = qte_alertas_criticos
+    df["qte_alertas_atencao"]  = qte_alertas_atencao
+    df["qte_alertas_cpu"]      = qte_alertas_cpu
+    df["qte_alertas_ram"]      = qte_alertas_ram
+    df["qte_alertas_disco"]    = qte_alertas_disco
     df["qte_alertas_latencia"] = qte_alertas_latencia
+
     alertas_gerados = pd.DataFrame(alertas_gerados)
     alertas_gerados.to_csv("alertas.csv", index=False)
     return df, alertas_gerados
+
 
 def aplicar_status_online(df: pd.DataFrame) -> pd.DataFrame:
     """
     Marca o servidor como OFFLINE se a leitura mais recente do arquivo
     tiver mais de LIMITE_OFFLINE_MINUTOS em relação ao momento de execução da ETL.
-
-    Isso detecta se o agente estava offline quando gerou o arquivo,
-    ou se o arquivo chegou com atraso significativo.
-
-    Colunas adicionadas:
-      idade_ultima_leitura_minutos → minutos entre a leitura e agora
-      rbc_status                   → 'ONLINE' ou 'OFFLINE'
-      rbc_status_motivo            → texto explicando o motivo (só quando OFFLINE)
     """
     agora = pd.Timestamp.now()
 
@@ -338,6 +357,7 @@ def aplicar_status_online(df: pd.DataFrame) -> pd.DataFrame:
     )
     return df
 
+
 def arquivo_existe(bucket, key):
     s3 = boto3.client("s3", **cfg_s3())
     try:
@@ -348,7 +368,8 @@ def arquivo_existe(bucket, key):
             return False
         else:
             raise e
-        
+
+
 def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
     s3 = boto3.client("s3", **cfg_s3())
     print(f"[S3] Baixando s3://{bucket}/{key} ...")
@@ -364,11 +385,11 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
             raise ValueError(f"Colunas obrigatórias ausentes no CSV: {ausentes}")
         df["endereco_mac"]  = df["endereco_mac"].map(limpar_mac)
         df["data_hora_iso"] = pd.to_datetime(df["data_hora_iso"], errors="coerce")
-
         print(f"[S3] {len(df):,} linhas | {df['endereco_mac'].nunique()} MAC(s).")
         return df
     return None
-    
+
+
 def caminho_para_tratado(df: pd.DataFrame, tipo: str):
     nome_empresa = df["nome_empresa"].dropna().unique()
     nome_empresa = nome_empresa[0]
@@ -376,19 +397,25 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
     mac_adress = df["endereco_mac"].dropna().unique()
     mac_adress = mac_adress[0]
     data_atual = datetime.now()
-    ano = data_atual.year
-    mes = data_atual.month
-    dia = data_atual.day
-    
+    ano  = data_atual.year
+    mes  = data_atual.month
+    dia  = data_atual.day
+
     if tipo == "alerta":
-        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/abertos/{mac_adress}.csv"
+        return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/abertos/{mac_adress}.csv"
     elif tipo == "tratado":
-        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/tratados/{mac_adress}.csv"
+        return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/tratados/{mac_adress}.csv"
     elif tipo == "semanal-tratados":
-        caminho = f"trusted/{nome_empresa}/semanal/tratados/{mac_adress}.csv"
+        return f"trusted/{nome_empresa}/semanal/tratados/{mac_adress}.csv"
     elif tipo == "semanal-alertas":
-        caminho = f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
-    return caminho
+        return f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
+    elif tipo == "json":
+        return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/json/{mac_adress}.json"
+    elif tipo == "semanal-json":
+        return f"trusted/{nome_empresa}/semanal/json/{mac_adress}.json"
+    else:
+        raise ValueError(f"Tipo desconhecido: {tipo}")
+
 
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = extrair_csv_s3(bucket=bucket, key=key)
@@ -405,15 +432,14 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
         df = df.merge(mapeamento, on="endereco_mac", how="left")
 
         df["nome_empresa"] = df["nome_empresa"].fillna("SEM_EMPRESA")
-        df["nome_linha"] = df["nome_linha"].fillna("SEM_LINHA")
-        df["id_rbc"] = df["id_rbc"].fillna(df["endereco_mac"])
-        df["nome_rbc"] = df["nome_rbc"].fillna(df["endereco_mac"])
+        df["nome_linha"]   = df["nome_linha"].fillna("SEM_LINHA")
+        df["id_rbc"]       = df["id_rbc"].fillna(df["endereco_mac"])
+        df["nome_rbc"]     = df["nome_rbc"].fillna(df["endereco_mac"])
 
-        print(f"[banco] Buscando limites para {df["id_rbc"].dropna().unique()} RBC(s)...")
-        
+        print(f"[banco] Buscando limites para {df['id_rbc'].dropna().unique()} RBC(s)...")
+
         tabela_limites = buscar_limites_rbc(df["id_rbc"].dropna().unique())
         if tabela_limites.empty:
-            # Sem limites cadastrados — colunas ficam NaN, alertas ficam None
             print("[banco] AVISO — nenhum limite encontrado. Alertas não serão gerados.")
             colunas_limite = [
                 "limite_cpu_alerta", "limite_cpu_critico",
@@ -425,14 +451,13 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
                 "limite_proc_threads_alerta", "limite_proc_threads_critico",
                 "limite_proc_qtd_alerta", "limite_proc_qtd_critico",
                 "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico",
-                "limite_proc_sintaxe"
+                "limite_proc_sintaxe",
             ]
             for col in colunas_limite:
                 df[col] = np.nan
         else:
             tabela_limites["id_rbc"] = pd.to_numeric(tabela_limites["id_rbc"], errors="coerce")
             df["_id_rbc_num"] = pd.to_numeric(df["id_rbc"], errors="coerce")
-
             df = df.merge(
                 tabela_limites,
                 left_on="_id_rbc_num",
@@ -440,16 +465,12 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
                 how="left",
                 suffixes=("", "_lim"),
             )
-            # Remove colunas auxiliares do merge
             df.drop(columns=["_id_rbc_num", "id_rbc_lim"], errors="ignore", inplace=True)
             print(f"[banco] Limites aplicados para {tabela_limites['id_rbc'].nunique()} RBC(s).")
 
         df, df_alertas = aplicar_alertas(df)
-
         df = calcular_score(df)
-
         df = aplicar_status_online(df)
-
 
         if df_alertas.empty:
             print("[alertas] Nenhum alerta nesta leitura.")
@@ -459,20 +480,32 @@ def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFr
                 f"{df_alertas['tipo_alerta'].value_counts().to_dict()}"
             )
 
-        df.drop(columns=["limite_cpu_alerta", "limite_cpu_critico", "limite_ram_alerta", "limite_ram_critico", "limite_disco_alerta", "limite_disco_critico", "limite_latencia_alerta", "limite_latencia_critico", "limite_proc_qtd_alerta", "limite_proc_qtd_critico", "limite_proc_sintaxe", "limite_proc_ram_alerta", "limite_proc_ram_critico", "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico", "limite_proc_cpu_alerta", "limite_proc_cpu_critico", "processos","idade_ultima_leitura_minutos", "url_jira", "email_usuario_jira", "token_usuario_jira", "limite_proc_threads_alerta", "limite_proc_threads_critico"], inplace=True)
+        df.drop(columns=[
+            "limite_cpu_alerta", "limite_cpu_critico",
+            "limite_ram_alerta", "limite_ram_critico",
+            "limite_disco_alerta", "limite_disco_critico",
+            "limite_latencia_alerta", "limite_latencia_critico",
+            "limite_proc_qtd_alerta", "limite_proc_qtd_critico",
+            "limite_proc_sintaxe",
+            "limite_proc_ram_alerta", "limite_proc_ram_critico",
+            "limite_proc_ram_uso_alerta", "limite_proc_ram_uso_critico",
+            "limite_proc_cpu_alerta", "limite_proc_cpu_critico",
+            "processos",
+            "idade_ultima_leitura_minutos",
+            "url_jira", "email_usuario_jira", "token_usuario_jira",
+            "limite_proc_threads_alerta", "limite_proc_threads_critico",
+        ], errors="ignore", inplace=True)
 
         return df, df_alertas
     return None, None
 
+
 def salvar_csv_trusted(df: pd.DataFrame, bucket: str, tipo: str):
     print("Iniciando processo de salvamento do CSV...")
-    # Gera o caminho onde o arquivo será salvo no S3
     caminho = caminho_para_tratado(df=df, tipo=tipo)
     print(f"Caminho gerado para o arquivo: {caminho}")
-    # Tenta buscar um arquivo já existente no S3
     print("Verificando se já existe arquivo no S3...")
     arquivo = extrair_csv_s3(bucket=bucket, key=caminho)
-    # Caso já exista arquivo
     if arquivo is not None:
         print("Arquivo existente encontrado!")
         if tipo != "semanal":
@@ -486,44 +519,51 @@ def salvar_csv_trusted(df: pd.DataFrame, bucket: str, tipo: str):
     else:
         print("Nenhum arquivo existente encontrado no S3.")
 
-    # Obtém os endereços MAC únicos
-    print("Obtendo endereços MAC únicos para semanal...")
-    mac_adress = df["endereco_mac"].dropna().unique()
-    mac_adress = mac_adress[0]
-
-    print(f"MAC(s) encontrado(s): {mac_adress}")
-
-    # Define nome do arquivo local
+    mac_adress = df["endereco_mac"].dropna().unique()[0]
     nome_arquivo = f"{mac_adress}.csv"
-
     print(f"Salvando CSV localmente como: {nome_arquivo}")
-
-    # Salva CSV local
     df.to_csv(nome_arquivo, index=False)
 
-    print("CSV salvo localmente com sucesso!")
-
-    # Cria cliente S3
-    print("Criando cliente S3...")
     s3 = boto3.client("s3", **cfg_s3())
-
     print(f"Enviando arquivo para bucket '{bucket}'...")
-    
-    # Upload do arquivo para o S3
     try:
-        s3.upload_file(
-            Filename=nome_arquivo,
-            Bucket=bucket,
-            Key=caminho
-        )
+        s3.upload_file(Filename=nome_arquivo, Bucket=bucket, Key=caminho)
         print("Upload realizado com sucesso!")
-        print("Removendo arquivo local temporário...")
-        print("Arquivo local removido!")
         return True
     except Exception as e:
         print("Erro ao tentar subir o arquivo: ", e)
     return False
-        
+
+
+def salvar_json_trusted(payload: dict, df_ref: pd.DataFrame, bucket: str, tipo: str = "json"):
+    """
+    Serializa `payload` como JSON e faz upload para o S3.
+    `df_ref` é usado apenas para derivar o caminho (nome_empresa / mac).
+    """
+    print(f"[JSON] Iniciando salvamento do JSON (tipo={tipo})...")
+    caminho = caminho_para_tratado(df=df_ref, tipo=tipo)
+    print(f"[JSON] Caminho: s3://{bucket}/{caminho}")
+
+    conteudo = json.dumps(payload, ensure_ascii=False, default=str, indent=2).encode("utf-8")
+    nome_arquivo_local = caminho.replace("/", "_") + ".json"
+
+    with open(nome_arquivo_local, "wb") as f:
+        f.write(conteudo)
+
+    s3 = boto3.client("s3", **cfg_s3())
+    try:
+        s3.upload_file(
+            Filename=nome_arquivo_local,
+            Bucket=bucket,
+            Key=caminho,
+            ExtraArgs={"ContentType": "application/json"},
+        )
+        print(f"[JSON] Upload concluído: s3://{bucket}/{caminho}")
+        return True
+    except Exception as e:
+        print(f"[JSON] Erro no upload: {e}")
+    return False
+
 
 def juntar_dataframes(df1: pd.DataFrame, df2: pd.DataFrame):
     try:
@@ -534,9 +574,9 @@ def juntar_dataframes(df1: pd.DataFrame, df2: pd.DataFrame):
         return df
     except Exception as e:
         print(f"Erro ao tentar concatenar os dataframes: {e}")
-    
     return None
-        
+
+
 def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
     print("\n" + "=" * 80)
     print("[SEMANAL] INICIANDO ATUALIZAÇÃO DO ARQUIVO SEMANAL")
@@ -554,64 +594,33 @@ def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
     if arquivo_antigo is not None:
         print("[SEMANAL] Arquivo semanal antigo encontrado!")
         print(f"[SEMANAL] Linhas no arquivo antigo: {len(arquivo_antigo)}")
-        print(f"[SEMANAL] Colunas do arquivo antigo: {list(arquivo_antigo.columns)}")
-
-        print("[SEMANAL] Concatenando arquivo antigo + dataframe atual...")
         df_semanal = juntar_dataframes(df1=arquivo_antigo, df2=df)
-
         if df_semanal is None:
             raise ValueError("[SEMANAL] Erro: concatenação retornou None.")
-
-        print(f"[SEMANAL] Linhas após concatenação: {len(df_semanal)}")
-
     else:
         print("[SEMANAL] Nenhum arquivo semanal antigo encontrado.")
-        print("[SEMANAL] O semanal será criado apenas com o dataframe atual.")
         df_semanal = df.copy()
 
-    print("[SEMANAL] Validando coluna de data...")
-
     if "data_hora_iso" not in df_semanal.columns:
-        raise ValueError(
-            "[SEMANAL] ERRO: coluna 'data_hora_iso' não existe no dataframe semanal."
-        )
+        raise ValueError("[SEMANAL] ERRO: coluna 'data_hora_iso' não existe no dataframe semanal.")
 
-    print("[SEMANAL] Convertendo data_hora_iso para datetime...")
-    df_semanal["data_hora_iso"] = pd.to_datetime(
-        df_semanal["data_hora_iso"],
-        errors="coerce"
-    )
+    df_semanal["data_hora_iso"] = pd.to_datetime(df_semanal["data_hora_iso"], errors="coerce")
 
     datas_invalidas = df_semanal["data_hora_iso"].isna().sum()
-    print(f"[SEMANAL] Datas inválidas após conversão: {datas_invalidas}")
-
     if datas_invalidas > 0:
-        print("[SEMANAL] Removendo linhas com data inválida...")
         df_semanal = df_semanal.dropna(subset=["data_hora_iso"])
-        print(f"[SEMANAL] Linhas após remover datas inválidas: {len(df_semanal)}")
 
     limite = pd.Timestamp.now() - pd.Timedelta(days=7)
-
-    print(f"[SEMANAL] Data/hora atual: {pd.Timestamp.now()}")
-    print(f"[SEMANAL] Limite mínimo para manter no semanal: {limite}")
-
     antes_filtro = len(df_semanal)
-
-    print("[SEMANAL] Aplicando filtro dos últimos 7 dias...")
     df_semanal = df_semanal[df_semanal["data_hora_iso"] >= limite]
-
     depois_filtro = len(df_semanal)
-
-    print(f"[SEMANAL] Linhas antes do filtro: {antes_filtro}")
-    print(f"[SEMANAL] Linhas depois do filtro: {depois_filtro}")
     print(f"[SEMANAL] Linhas removidas por serem antigas: {antes_filtro - depois_filtro}")
 
-    print("[SEMANAL] Ordenando por data_hora_iso...")
     df_semanal = df_semanal.sort_values("data_hora_iso")
 
     if not df_semanal.empty:
         print(f"[SEMANAL] Primeira data mantida: {df_semanal['data_hora_iso'].min()}")
-        print(f"[SEMANAL] Última data mantida: {df_semanal['data_hora_iso'].max()}")
+        print(f"[SEMANAL] Última data mantida:   {df_semanal['data_hora_iso'].max()}")
         print(f"[SEMANAL] MACs no semanal: {df_semanal['endereco_mac'].dropna().unique().tolist()}")
     else:
         print("[SEMANAL] AVISO: dataframe semanal ficou vazio após o filtro.")
@@ -621,42 +630,130 @@ def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
     return df_semanal
 
 
-    
-    
-def main():
-    """
-    Execução local para testes sem Lambda.
-    Lê S3_BUCKET e S3_KEY do .env e grava localmente para inspeção.
-    """
-    bucket = os.getenv("S3_BUCKET")
-    key    = os.getenv("S3_KEY")
+# ---------------------------------------------------------------------------
+# JSON builders
+# ---------------------------------------------------------------------------
 
-    if not bucket or not key:
-        raise ValueError("Defina S3_BUCKET e S3_KEY no .env para execução local.")
+def reading_json(row):
+    """Converte uma linha do DataFrame em um dicionário de leitura."""
+    return {
+        "data_hora":                         row["data_hora_iso"].isoformat() if pd.notna(row.get("data_hora_iso")) else None,
+        "rbc_status":                        native(row.get("rbc_status")),
+        "gap_leitura_anterior_minutos":      native(row.get("gap_leitura_anterior_minutos")),
+        "gap_leitura_anterior_segundos":     native(row.get("gap_leitura_anterior_segundos")),
+        "idade_ultima_leitura_minutos":      native(row.get("idade_ultima_leitura_minutos")),
+        "idade_ultima_leitura_segundos":     native(row.get("idade_ultima_leitura_segundos")),
+        "criticidade":                       native(row.get("criticidade")),
+        "score":                             native(row.get("score_saude")),
+        "latencia_ping_ms":                  native(row.get("latencia_ping_ms")),
+        "cpu": {
+            "percentual_uso_cpu": native(row.get("percentual_uso_cpu")),
+            "frequencia_atual":   native(row.get("frequencia_cpu_atual_mhz_human")),
+        },
+        "memoria": {
+            "percentual_uso_ram": native(row.get("percentual_uso_ram")),
+            "total":              native(row.get("memoria_total_bytes_human")),
+            "disponivel":         native(row.get("memoria_disponivel_bytes_human")),
+        },
+        "disco": {
+            "percentual_uso_disco": native(row.get("percentual_uso_disco")),
+            "livre":                native(row.get("disco_livre_bytes_human")),
+            "usado":                native(row.get("disco_usado_bytes_human")),
+        },
+        "rede": {
+            "download_por_segundo": native(row.get("taxa_download_rede_bytes_por_segundo_human")),
+            "upload_por_segundo":   native(row.get("taxa_upload_rede_bytes_por_segundo_human")),
+        },
+    }
+
+
+def build_json(df: pd.DataFrame) -> dict:
+    """
+    Monta a estrutura hierárquica empresa → linha → rbc → últimas leituras
+    e retorna um dicionário pronto para json.dumps.
+    """
+    empresas = []
+    for (id_emp, nome_emp), edf in df.groupby(["id_empresa", "nome_empresa"], dropna=False):
+        linhas = []
+        for (id_lin, nome_lin), ldf in edf.groupby(["id_linha", "nome_linha"], dropna=False):
+            rbcs = []
+            for id_rbc, rdf in ldf.groupby("id_rbc", dropna=False):
+                last = rdf.sort_values("data_hora_iso").tail(CFG["last_n"])
+                lr   = last.iloc[-1]
+                rbcs.append({
+                    "id_rbc":                              native(id_rbc),
+                    "nome_rbc":                            native(lr.get("nome_rbc")),
+                    "endereco_mac":                        native(lr.get("endereco_mac")),
+                    "status_atual":                        native(lr.get("rbc_status")),
+                    "ultimo_gap_leitura_anterior_minutos": native(lr.get("gap_leitura_anterior_minutos")),
+                    "ultimo_gap_leitura_anterior_segundos":native(lr.get("gap_leitura_anterior_segundos")),
+                    "ultimas_leituras":                    [reading_json(row) for _, row in last.iterrows()],
+                })
+            rbcs.sort(key=lambda x: str(x.get("id_rbc") or ""))
+            linhas.append({
+                "id_linha":   native(id_lin),
+                "nome_linha": native(nome_lin),
+                "rbc":        rbcs,
+            })
+        linhas.sort(key=lambda x: str(x.get("id_linha") or x.get("nome_linha") or ""))
+        empresas.append({
+            "id_empresa":   native(id_emp),
+            "nome_empresa": native(nome_emp),
+            "linhas":       linhas,
+        })
+    empresas.sort(key=lambda x: str(x.get("id_empresa") or x.get("nome_empresa") or ""))
+    return {"empresas": empresas}
+
+
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
+
+def main(event):
+    bucket = event.get("bucket")
+    key    = event.get("key")
 
     df, df_alertas = extrair_e_enriquecer(bucket=bucket, key=key)
+
     if df is not None:
+        # ── CSV diário e semanal ──────────────────────────────────────────
         df_semanal = atualizar_semanal(bucket=bucket, df=df)
-        salvar_csv_trusted(bucket=bucket, df=df_semanal,tipo="semanal-tratados")
+        salvar_csv_trusted(bucket=bucket, df=df_semanal, tipo="semanal-tratados")
         salvar_csv_trusted(df=df, bucket=bucket, tipo="tratado")
-        print("\n" + "=" * 60)
-        print("Resumo — DataFrame tratado")
-        print("=" * 60)
-        print(f"Linhas            : {len(df):,}")
-        print(f"Colunas           : {len(df.columns)}")
-        print(f"Empresas          : {df['id_empresa'].nunique(dropna=False)}")
-        print(f"Linhas de produção: {df['id_linha'].nunique(dropna=False)}")
-        print(f"RBCs              : {df['id_rbc'].nunique(dropna=False)}")
-        print(f"AlertIs CRITICO   : {int(df['qte_alertas_critico'].sum())}")
-        print(f"Alertas ATENÇÃO   : {int(df['qte_alertas_atencao'].sum())}")
-        print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
-        print("=" * 60)
-        
+
+        # ── JSON diário ───────────────────────────────────────────────────
+        print("[JSON] Construindo JSON diário...")
+        payload_diario = build_json(df)
+        salvar_json_trusted(payload=payload_diario, df_ref=df, bucket=bucket, tipo="json")
+
+        # ── JSON semanal ──────────────────────────────────────────────────
+        print("[JSON] Construindo JSON semanal...")
+        payload_semanal = build_json(df_semanal)
+        salvar_json_trusted(payload=payload_semanal, df_ref=df_semanal, bucket=bucket, tipo="semanal-json")
+
     if df_alertas is not None and not df_alertas.empty:
         print("\nRegistros de alerta gerados:")
-        print(df_alertas[["nome_rbc", "componente_afetado", "tipo_alerta", "valor_medido", "limite_atencao", "limite_critico"]].to_string(index=False))
+        print(
+            df_alertas[[
+                "nome_rbc", "componente_afetado", "tipo_alerta",
+                "valor_medido", "limite_atencao", "limite_critico",
+            ]].to_string(index=False)
+        )
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="semanal-alertas")
 
-if __name__ == "__main__":
-    main()
+    return payload_diario if df is not None else {}
+
+
+def lambda_handler(event, context):
+    try:
+        result = main(event or {})
+        return {
+            "statusCode": 200,
+            "body": json.dumps(result, ensure_ascii=False, default=str),
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False),
+        }

@@ -718,7 +718,44 @@ def dashboardIncidentes():
     return incidentes 
 
 
-#def lambda_handler(event, context):
+# def run(event):
+#     in_bucket = event.get("input_bucket") or os.environ["INPUT_BUCKET"]
+#     out_bucket = event.get("output_bucket") or os.getenv("OUTPUT_BUCKET") or in_bucket
+#     out_key = event.get("output_key") or os.getenv("OUTPUT_KEY", "trusted/empresas_linhas_rbc.json")
+#     keys = event.get("input_keys") or ([event["input_key"]] if event.get("input_key") else list_csv_keys(in_bucket, event.get("input_prefix") or os.getenv("INPUT_PREFIX", "raw/")))
+#     raw = prepare(read_s3_csvs(in_bucket, keys))
+#     mapping = map_fallback(raw) if b("NO_DB", False) else map_db(sorted(raw["endereco_mac"].dropna().unique().tolist()))
+#     df = add_proc_alerts(inactivity(enrich(raw, mapping)))
+#     data = build_json(df)
+#     s3.put_object(Bucket=out_bucket, Key=out_key, Body=json.dumps(native(data), ensure_ascii=False, indent=CFG["indent"]).encode("utf-8"), ContentType="application/json; charset=utf-8")
+#     return {"ok": True, "input_bucket": in_bucket, "input_keys": keys, "output_bucket": out_bucket, "output_key": out_key, "total_empresas": len(data["empresas"]), "total_maquinas": sum(len(l["rbc"]) for e in data["empresas"] for l in e["linhas"]), "leituras_offline": int((df["rbc_status"] == "OFFLINE").sum()), "json": data if event.get("return_json", False) else None}
+
+def lambda_handler(event, context):
+    try:
+        return {
+            "statusCode": 200,
+             "body": json.dumps
+                (
+                    extrair_e_enriquecer(bucket=event.get("bucket"),key=event.get("key"),usar_banco=not event.get("no_db", False) or {}),
+                    ensure_ascii=False,
+                    default=str
+                )
+             }
+    except Exception as e:
+        return 
+        {
+            "statusCode": 500,
+            "body": json.dumps
+                (
+                    {
+                    "ok": False,
+                    "erro": str(e)
+                    },
+                ensure_ascii=False
+                )
+        }
+
+# def lambda_handler(event, context):
 #    df = extrair_e_enriquecer(
 #        bucket=event.get("bucket"),
 #        key=event.get("key"),
@@ -731,5 +768,5 @@ def dashboardIncidentes():
 #    }
 
 
-dashboardOperacao()
-dashboardIncidentes()
+# dashboardOperacao()
+# dashboardIncidentes()

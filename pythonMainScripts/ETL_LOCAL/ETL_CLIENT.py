@@ -661,19 +661,18 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
     print("[dashboardOperacao] Processo finalizado.")
 
 
-def main():
+def main(event):
     """
     Função principal do script.
-
     Fluxo:
-    1. Lê o nome do bucket no .env.
-    2. Busca os arquivos do S3.
+    1. Lê o nome do bucket no .env. NAO MAIS LMAO
+    2. Busca os arquivos do S3.     
     3. Junta os arquivos em DataFrames.
     4. Gera o dashboard operacional.
     """
     print("\n[main] Iniciando script...")
 
-    bucket = os.getenv("S3_BUCKET")
+    bucket = event.get("bucket")
     print("[main] Bucket carregado do .env:", bucket)
 
     if not bucket:
@@ -687,7 +686,31 @@ def main():
         df_alertas=df_principal_alertas
     )
 
+def lambda_handler(event, context):
+    try:
+        return {
+            "statusCode": 200,
+             "body": json.dumps
+                (
+                    main(event or {}),
+                    ensure_ascii=False,
+                    default=str
+                )
+             }
+    except Exception as e:
+        return 
+        {
+            "statusCode": 500,
+            "body": json.dumps
+                (
+                    {
+                    "ok": False,
+                    "erro": str(e)
+                    },
+                ensure_ascii=False
+                )
+        }
 # Garante que o main só rode quando o arquivo for executado diretamente.
 # Isso evita execução automática caso esse arquivo seja importado por outro script.
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
