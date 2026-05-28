@@ -652,7 +652,7 @@ def main():
         print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
         print("=" * 60)
         
-    if df_alertas is not None :
+    if df_alertas is not None and not df_alertas.empty:
         print("\nRegistros de alerta gerados:")
         print(df_alertas[["nome_rbc", "componente_afetado", "tipo_alerta", "valor_medido", "limite_atencao", "limite_critico"]].to_string(index=False))
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")

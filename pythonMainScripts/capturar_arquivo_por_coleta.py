@@ -30,7 +30,8 @@ def _gerar_mac() -> str:
     n = uuid.getnode()
     return ":".join([f"{(n >> i) & 0xff:02x}" for i in range(0, 48, 8)][::-1]).replace(":", "-")
 
-ENDERECO_MAC = _gerar_mac() 
+ENDERECO_MAC = _gerar_mac().split("-")
+ENDERECO_MAC = "30" + "-" + ENDERECO_MAC[1] + "-" + ENDERECO_MAC[2] + "-" + ENDERECO_MAC[3] + "-" + ENDERECO_MAC[4] + "-" + ENDERECO_MAC[5] 
 
 s3 = boto3.client(
     "s3",

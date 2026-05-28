@@ -306,115 +306,65 @@ def salvar_json_client(json_dashboard: dict, bucket: str, tipo: str):
     except Exception as e:
         print("Erro ao tentar subir o arquivo: ", e)
     return False
-
 def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
-    """
-    Gera o objeto final do dashboard operacional.
-
-    O cálculo principal é baseado no atraso entre envios dos dados:
-    - calcula a diferença entre um envio e outro por empresa/linha/RBC
-    - desconta o tempo esperado de coleta e a tolerância
-    - transforma segundos excedentes em custo desperdiçado
-
-    Também organiza o resultado por:
-    - empresa
-    - dia
-    - linha
-    - servidor/RBC
-    - gráfico de custo ao longo do tempo
-    """
-    print("\n[dashboardOperacao] Iniciando montagem do dashboard...")
-    print("[dashboardOperacao] Shape df_tratado recebido:", df_tratado.shape)
-    print("[dashboardOperacao] Shape df_alertas recebido:", df_alertas.shape)
-
-    # Segurança: se vier vazio, evita quebrar no restante do processamento
     if df_tratado.empty:
         print("[dashboardOperacao] ERRO: df_tratado está vazio. Não há dados para processar.")
         return
-
-    # Converte a coluna de envio para datetime
     df_tratado["data_hora_envio"] = pd.to_datetime(
         df_tratado["data_hora_envio"],
         errors="coerce"
     )
-
-    print(
-        "[dashboardOperacao] Datas inválidas em data_hora_envio:",
-        df_tratado["data_hora_envio"].isna().sum()
-    )
-
-    # Ordena os dados para o diff() calcular corretamente o intervalo entre registros
     df_tratado = df_tratado.sort_values(
         ["id_empresa", "id_linha", "id_rbc", "data_hora_envio"]
     )
-
-    print("[dashboardOperacao] Dados ordenados por empresa, linha, RBC e data.")
-
-    # Calcula a diferença, em segundos, entre uma coleta e a anterior
     df_tratado["diff_envio_segundos"] = (
         df_tratado.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
         .diff()
     ).dt.total_seconds()
-
-    print("[dashboardOperacao] Coluna diff_envio_segundos criada.")
-    print("[dashboardOperacao] Exemplo de diferenças:")
-    print(df_tratado[["id_empresa", "id_linha", "id_rbc", "data_hora_envio", "diff_envio_segundos"]].head())
-
-    # Regras de negócio para calcular desperdício
-    TEMPO_COLETA = 5       # tempo esperado entre coletas, em segundos
-    TOLERANCIA = 30        # tolerância extra antes de considerar atraso
-    CUSTO_SEGUNDO = 31.25  # custo financeiro por segundo excedente
-
-    print("[dashboardOperacao] TEMPO_COLETA:", TEMPO_COLETA)
-    print("[dashboardOperacao] TOLERANCIA:", TOLERANCIA)
-    print("[dashboardOperacao] CUSTO_SEGUNDO:", CUSTO_SEGUNDO)
-
-    # Se o intervalo passou do tempo esperado + tolerância, calcula o excesso.
-    # clip(lower=0) impede valores negativos.
+    TEMPO_COLETA = 5
+    TOLERANCIA = 30
+    CUSTO_SEGUNDO = 31.25
     df_tratado["segundos_excesso"] = (
         df_tratado["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
     ).clip(lower=0)
-
     print("[dashboardOperacao] Coluna segundos_excesso criada.")
 
-    # Conta quantos servidores/RBCs existem por empresa e linha
     df_tratado["qtd_servidores"] = df_tratado.groupby(
         ["id_empresa", "id_linha"]
     )["id_rbc"].transform("nunique")
 
     print("[dashboardOperacao] Coluna qtd_servidores criada.")
 
-    # Divide o custo pelo número de servidores da linha
     df_tratado["custo_desperdicado"] = (
         df_tratado["segundos_excesso"] * CUSTO_SEGUNDO / df_tratado["qtd_servidores"]
     )
 
     print("[dashboardOperacao] Coluna custo_desperdicado criada.")
     print("[dashboardOperacao] Custo total calculado:", df_tratado["custo_desperdicado"].sum())
-
-    # Salva uma cópia do DataFrame tratado para conferência
     print("[dashboardOperacao] Arquivo df_tratado.csv salvo.")
 
     resultado = {}
-    
 
-    # Agrupa por empresa para montar o JSON final
     for (id_empresa, nome_empresa), df_tratado_empresa in df_tratado.groupby(["id_empresa", "nome_empresa"]):
         print(f"\n[dashboardOperacao] Processando empresa {id_empresa} - {nome_empresa}")
 
         custo_empresa = df_tratado_empresa["custo_desperdicado"].sum()
         print("[dashboardOperacao] Custo total da empresa:", custo_empresa)
-        
+
         resultado[id_empresa] = {
             "nome": nome_empresa,
             "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "custo_total_semana": float(custo_empresa),
-            "custo_por_dia": {},
+            "resumo": {
+                "custo_opex_desperdicado_semana": float(custo_empresa),
+                "qte_alertas_semana": 0,
+                "alertas_por_motivo": {},
+                "tipo_alertas": {}
+            },
+            "dias": {},
             "linhas": {},
-            "custo_ao_longo_tempo": {}
+            "custo_ao_longo_tempo": []
         }
 
-        # Monta dados para gráfico de custo ao longo do tempo
         df_tratado_lote_custo = (
             df_tratado_empresa
             .groupby(["data_hora_envio"], as_index=False)
@@ -433,13 +383,12 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
         resultado[id_empresa]["custo_ao_longo_tempo"] = [
             {
                 "data": str(linha["data_hora_envio"]),
-                "custo": float(linha["custo_desperdicado"]),
-                "objetivoFinanceiro": str(linha["objetivoFinanceiro"])
+                "custo_opex_desperdicado": float(linha["custo_desperdicado"]),
+                "objetivoFinanceiro": float(linha["objetivoFinanceiro"])
             }
             for indice, linha in df_tratado_lote_custo.iterrows()
         ]
 
-        # Custo por dia da empresa
         for dia, df_diario_empresa in df_tratado_empresa.groupby(df_tratado_empresa["data_hora_envio"].dt.date):
             data = str(dia)
             dia_semana = pd.Timestamp(dia).day_name()
@@ -447,12 +396,17 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
 
             print(f"[dashboardOperacao] Empresa {id_empresa} | Dia {data} | Custo {custo_dia}")
 
-            resultado[id_empresa]["custo_por_dia"][data] = {
-                "dia_semana": str(dia_semana),
-                "custo_dia": str(custo_dia)
-            }
+            if data not in resultado[id_empresa]["dias"]:
+                resultado[id_empresa]["dias"][data] = {
+                    "dia_semana": str(dia_semana),
+                    "custo_opex_desperdicado": 0.0,
+                    "qte_alertas": 0,
+                    "alertas_por_motivo": {},
+                    "tipo_alertas": {}
+                }
 
-        # Agrupa por linha dentro da empresa
+            resultado[id_empresa]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia)
+
         for (id_linha, nome_linha), df_tratado_linha in df_tratado_empresa.groupby(["id_linha", "nome_linha"]):
             print(f"[dashboardOperacao] Processando linha {id_linha} - {nome_linha}")
 
@@ -460,14 +414,18 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
 
             resultado[id_empresa]["linhas"][id_linha] = {
                 "nome": nome_linha,
-                "custo_total": float(custo_linha),
-                "custo_por_dia": {},
+                "resumo": {
+                    "custo_opex_desperdicado": float(custo_linha),
+                    "qte_alertas": 0,
+                    "alertas_por_motivo": {},
+                    "tipo_alertas": {}
+                },
+                "dias": {},
                 "servidores": {}
             }
 
             print("[dashboardOperacao] Custo total da linha:", custo_linha)
 
-            # Custo por dia da linha
             for dia, df_diario_linha in df_tratado_linha.groupby(df_tratado_linha["data_hora_envio"].dt.date):
                 data = str(dia)
                 dia_semana = pd.Timestamp(dia).day_name()
@@ -475,85 +433,233 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
 
                 print(f"[dashboardOperacao] Linha {id_linha} | Dia {data} | Custo {custo_dia}")
 
-                resultado[id_empresa]["linhas"][id_linha]["custo_por_dia"][data] = {
-                    "dia_semana": str(dia_semana),
-                    "custo_dia": str(custo_dia)
-                }
-            # Agrupa por servidor/RBC dentro da linha
+                if data not in resultado[id_empresa]["linhas"][id_linha]["dias"]:
+                    resultado[id_empresa]["linhas"][id_linha]["dias"][data] = {
+                        "dia_semana": str(dia_semana),
+                        "custo_opex_desperdicado": 0.0,
+                        "qte_alertas": 0,
+                        "alertas_por_motivo": {},
+                        "tipo_alertas": {}
+                    }
+
+                resultado[id_empresa]["linhas"][id_linha]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia)
+
             for (id_rbc, nome_rbc), df_tratado_rbc in df_tratado_linha.groupby(["id_rbc", "nome_rbc"]):
                 custo_rbc = df_tratado_rbc["custo_desperdicado"].sum()
                 print(f"[dashboardOperacao] RBC {id_rbc} - {nome_rbc} | Custo {custo_rbc}")
+
                 resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
                     "nome": nome_rbc,
-                    "custo_total": float(custo_rbc)
+                    "resumo": {
+                        "custo_opex_desperdicado": float(custo_rbc),
+                        "qte_alertas": 0,
+                        "alertas_por_motivo": {},
+                        "tipo_alertas": {}
+                    },
+                    "dias": {}
                 }
 
-    # Parte ainda não finalizada: transformação do DataFrame de alertas
+                for dia, df_diario_rbc in df_tratado_rbc.groupby(df_tratado_rbc["data_hora_envio"].dt.date):
+                    data = str(dia)
+                    dia_semana = pd.Timestamp(dia).day_name()
+                    custo_dia_rbc = df_diario_rbc["custo_desperdicado"].sum()
+
+                    print(f"[dashboardOperacao] RBC {id_rbc} | Dia {data} | Custo {custo_dia_rbc}")
+
+                    if data not in resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"]:
+                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data] = {
+                            "dia_semana": str(dia_semana),
+                            "custo_opex_desperdicado": 0.0,
+                            "qte_alertas": 0,
+                            "alertas_por_motivo": {},
+                            "tipo_alertas": {}
+                        }
+
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia_rbc)
+
     print("\n[dashboardOperacao] Iniciando leitura dos alertas...")
 
     if df_alertas.empty:
         print("[dashboardOperacao] Nenhum alerta encontrado para processar.")
     else:
         df_alertas["data_hora_iso"] = pd.to_datetime(df_alertas["data_hora_iso"], errors="coerce")
+
         for (id_empresa, nome_empresa), df_empresa_alertas in df_alertas.groupby(["id_empresa", "nome_empresa"]):
             print(f"[dashboardOperacao] Alertas da empresa {id_empresa} - {nome_empresa}")
-            resultado[id_empresa]["alertas_por_motivo"] = (
+
+            if id_empresa not in resultado:
+                resultado[id_empresa] = {
+                    "nome": nome_empresa,
+                    "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "resumo": {
+                        "custo_opex_desperdicado_semana": 0.0,
+                        "qte_alertas_semana": 0,
+                        "alertas_por_motivo": {},
+                        "tipo_alertas": {}
+                    },
+                    "dias": {},
+                    "linhas": {},
+                    "custo_ao_longo_tempo": []
+                }
+
+            resultado[id_empresa]["resumo"]["qte_alertas_semana"] = int(len(df_empresa_alertas))
+            resultado[id_empresa]["resumo"]["alertas_por_motivo"] = (
                 df_empresa_alertas["motivo_resumido"]
                 .value_counts()
                 .to_dict()
             )
-            resultado[id_empresa]["alertas_por_dia"] = {}
+            resultado[id_empresa]["resumo"]["tipo_alertas"] = (
+                df_empresa_alertas["tipo_alerta"]
+                .value_counts()
+                .to_dict()
+            )
+
             for dia, df_diario_alertas in df_empresa_alertas.groupby(df_empresa_alertas["data_hora_iso"].dt.date):
                 data = str(dia)
                 dia_semana = pd.Timestamp(dia).day_name()
-                resultado[id_empresa]["alertas_por_dia"][data] = {
-                    "qte_alertas": float(len(df_diario_alertas)),
-                    "dia_semana": str(dia_semana),
-                }
-                
+
+                if data not in resultado[id_empresa]["dias"]:
+                    resultado[id_empresa]["dias"][data] = {
+                        "dia_semana": str(dia_semana),
+                        "custo_opex_desperdicado": 0.0,
+                        "qte_alertas": 0,
+                        "alertas_por_motivo": {},
+                        "tipo_alertas": {}
+                    }
+
+                resultado[id_empresa]["dias"][data]["qte_alertas"] = int(len(df_diario_alertas))
+                resultado[id_empresa]["dias"][data]["alertas_por_motivo"] = (
+                    df_diario_alertas["motivo_resumido"]
+                    .value_counts()
+                    .to_dict()
+                )
+                resultado[id_empresa]["dias"][data]["tipo_alertas"] = (
+                    df_diario_alertas["tipo_alerta"]
+                    .value_counts()
+                    .to_dict()
+                )
+
             for (id_linha, nome_linha), df_linha_alertas in df_empresa_alertas.groupby(["id_linha", "nome_linha"]):
                 print(f"[dashboardOperacao] Processando linha {id_linha} - {nome_linha}")
-                qte_alertas = len(df_linha_alertas)
-                resultado[id_empresa]["linhas"][id_linha]["qte_alertas"] = int(qte_alertas)
-                print("[dashboardOperacao] Quantidade de alertas da linha: ", qte_alertas)
 
-                # Custo por dia da linha
-                resultado[id_empresa]["linhas"][id_linha]["alertas_por_motivo"] = (
+                if id_linha not in resultado[id_empresa]["linhas"]:
+                    resultado[id_empresa]["linhas"][id_linha] = {
+                        "nome": nome_linha,
+                        "resumo": {
+                            "custo_opex_desperdicado": 0.0,
+                            "qte_alertas": 0,
+                            "alertas_por_motivo": {},
+                            "tipo_alertas": {}
+                        },
+                        "dias": {},
+                        "servidores": {}
+                    }
+
+                qte_alertas_linha = len(df_linha_alertas)
+                print("[dashboardOperacao] Quantidade de alertas da linha:", qte_alertas_linha)
+
+                resultado[id_empresa]["linhas"][id_linha]["resumo"]["qte_alertas"] = int(qte_alertas_linha)
+                resultado[id_empresa]["linhas"][id_linha]["resumo"]["alertas_por_motivo"] = (
                     df_linha_alertas["motivo_resumido"]
                     .value_counts()
                     .to_dict()
                 )
-                
-                resultado[id_empresa]["linhas"][id_linha]["qte_alertas_por_dia"] = {}
+                resultado[id_empresa]["linhas"][id_linha]["resumo"]["tipo_alertas"] = (
+                    df_linha_alertas["tipo_alerta"]
+                    .value_counts()
+                    .to_dict()
+                )
+
                 for dia, df_diario_linha in df_linha_alertas.groupby(df_linha_alertas["data_hora_iso"].dt.date):
                     data = str(dia)
                     dia_semana = pd.Timestamp(dia).day_name()
-                    qte_alertas = len(df_diario_linha)
-                    
-                    print(f"[dashboardOperacao] Linha: {id_linha} | Dia: {data} | Quantidade: {qte_alertas}")
-                    
+                    qte_alertas_dia_linha = len(df_diario_linha)
 
-                    resultado[id_empresa]["linhas"][id_linha]["qte_alertas_por_dia"][data] = {
-                        "dia_semana": str(dia_semana),
-                        "qte_alertas": str(qte_alertas)
-                    }
-                    # Agrupa por servidor/RBC dentro da linha
-                
+                    print(f"[dashboardOperacao] Linha: {id_linha} | Dia: {data} | Quantidade: {qte_alertas_dia_linha}")
+
+                    if data not in resultado[id_empresa]["linhas"][id_linha]["dias"]:
+                        resultado[id_empresa]["linhas"][id_linha]["dias"][data] = {
+                            "dia_semana": str(dia_semana),
+                            "custo_opex_desperdicado": 0.0,
+                            "qte_alertas": 0,
+                            "alertas_por_motivo": {},
+                            "tipo_alertas": {}
+                        }
+
+                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["qte_alertas"] = int(qte_alertas_dia_linha)
+                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["alertas_por_motivo"] = (
+                        df_diario_linha["motivo_resumido"]
+                        .value_counts()
+                        .to_dict()
+                    )
+                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["tipo_alertas"] = (
+                        df_diario_linha["tipo_alerta"]
+                        .value_counts()
+                        .to_dict()
+                    )
+
                 for (id_rbc, nome_rbc), df_rbc_alertas in df_linha_alertas.groupby(["id_rbc", "nome_rbc"]):
                     qte_alertas_rbc = len(df_rbc_alertas)
                     print(f"[dashboardOperacao] RBC {id_rbc} - {nome_rbc} | Alertas {qte_alertas_rbc}")
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["qte_alertas"] = float(qte_alertas_rbc)
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["alertas_por_motivo"] = (
+
+                    if id_rbc not in resultado[id_empresa]["linhas"][id_linha]["servidores"]:
+                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
+                            "nome": nome_rbc,
+                            "resumo": {
+                                "custo_opex_desperdicado": 0.0,
+                                "qte_alertas": 0,
+                                "alertas_por_motivo": {},
+                                "tipo_alertas": {}
+                            },
+                            "dias": {}
+                        }
+
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["qte_alertas"] = int(qte_alertas_rbc)
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["alertas_por_motivo"] = (
                         df_rbc_alertas["motivo_resumido"]
                         .value_counts()
                         .to_dict()
-                    )                                  
-    bucket = os.getenv("S3_BUCKET")   
+                    )
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["tipo_alertas"] = (
+                        df_rbc_alertas["tipo_alerta"]
+                        .value_counts()
+                        .to_dict()
+                    )
+
+
+                    for dia, df_diario_rbc in df_rbc_alertas.groupby(df_rbc_alertas["data_hora_iso"].dt.date):
+                        data = str(dia)
+                        dia_semana = pd.Timestamp(dia).day_name()
+                        qte_alertas_dia_rbc = len(df_diario_rbc)
+
+                        print(f"[dashboardOperacao] RBC: {id_rbc} | Dia: {data} | Quantidade: {qte_alertas_dia_rbc}")
+
+                        if data not in resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"]:
+                            resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data] = {
+                                "dia_semana": str(dia_semana),
+                                "custo_opex_desperdicado": 0.0,
+                                "qte_alertas": 0,
+                                "alertas_por_motivo": {},
+                                "tipo_alertas": {}
+                            }
+
+                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["qte_alertas"] = int(qte_alertas_dia_rbc)
+                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["alertas_por_motivo"] = (
+                            df_diario_rbc["motivo_resumido"]
+                            .value_counts()
+                            .to_dict()
+                        )
+                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["tipo_alertas"] = (
+                            df_diario_rbc["tipo_alerta"]
+                            .value_counts()
+                            .to_dict()
+                        )
+
+    bucket = os.getenv("S3_BUCKET")
     salvar_json_client(json_dashboard=resultado, bucket=bucket, tipo="operacao")
-
-
     print("[dashboardOperacao] Arquivo saida.json salvo com sucesso.")
     print("[dashboardOperacao] Processo finalizado.")
+
 
 def main():
     """
