@@ -25,6 +25,17 @@ CFG = {
 }
 
 
+#p evitar chamadas repetidas p a mesma cidade na mesma rodada
+CACHE_CLIMA: dict[str, dict] = {}
+
+#mapeamento geográfico aprox. p consultas na api
+COORDENADAS_REGIOES = {
+    "NORTE": {"lat": -23.4842, "lon": -46.6256},
+    "SUL":   {"lat": -23.6822, "lon": -46.6917},
+    "LESTE": {"lat": -23.5514, "lon": -46.5015},
+    "OESTE": {"lat": -23.5593, "lon": -46.7214},
+    "CENTRO": {"lat": -23.5489, "lon": -46.6388}
+}
 def cfg_mysql() -> dict:
     """Lê credenciais do MySQL a partir de variáveis de ambiente."""
     return {
@@ -144,6 +155,7 @@ def buscar_mapeamento_rbc(mac_adress: list[str]) -> pd.DataFrame:
                 CONCAT('Linha ', l.idLinha) AS nome_linha,
                 r.idRbc AS id_rbc,
                 r.nomeServidor AS nome_rbc,
+                
                 r.objetivoFinanceiro AS objetivoFinanceiro
 
             FROM rbc r
@@ -161,8 +173,13 @@ def buscar_mapeamento_rbc(mac_adress: list[str]) -> pd.DataFrame:
             "endereco_mac", "id_empresa", "nome_empresa",
             "id_linha", "nome_linha", "id_rbc", "nome_rbc", "objetivoFinanceiro",
         ])
-    return pd.DataFrame(rows)
+    # return pd.DataFrame(rows)
 
+    #adicionando a coluna manualmente enquanto nao existe no banco ainda (adicionar no select dps)
+    df_map = pd.DataFrame(rows)
+    df_map["regiao"] = "CENTRO"
+    
+    return df_map
 
 def buscar_limites_rbc(id_rbc) -> pd.DataFrame:
     """
@@ -257,7 +274,6 @@ def retornar_motivo_alerta(nome_coluna, status, limite):
         motivo_descricao = f"Percentual de LATENCIA acima de {limite}ms "
         motivo_resumido = f"LATENCIA acima de {limite}ms "
     return motivo_descricao, motivo_resumido
-
 
 def aplicar_alertas(df: pd.DataFrame):
     colunas_limite = {
@@ -416,6 +432,11 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
     else:
         raise ValueError(f"Tipo desconhecido: {tipo}")
 
+        caminho = f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
+        
+    elif tipo == "incidentes":
+        caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/incidentes/incidentes_{ano}-{mes}-{dia}.csv"
+    return caminho
 
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = extrair_csv_s3(bucket=bucket, key=key)
@@ -633,6 +654,187 @@ def atualizar_semanal(bucket: str, df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # JSON builders
 # ---------------------------------------------------------------------------
+#================================================================================================================================
+def obter_clima_por_regiao(regiao: str) -> Optional[dict]:
+    """Busca o clima atualizado por coordenadas usando a região de do rbc como chave."""
+    if not regiao or pd.isna(regiao):
+        return None
+        
+    regiao_chave = str(regiao).strip().upper()
+    
+    if regiao_chave in COORDENADAS_REGIOES:
+        lat = COORDENADAS_REGIOES[regiao_chave]["lat"]
+        lon = COORDENADAS_REGIOES[regiao_chave]["lon"]
+        cache_key = f"{lat}_{lon}"
+    else:
+        cache_key = regiao_chave
+        lat, lon = None, None
+
+    # Se já estiver no cache retorna
+    if cache_key in CACHE_CLIMA and isinstance(CACHE_CLIMA[cache_key], dict):
+        return CACHE_CLIMA[cache_key]
+        
+    api_key = os.getenv("OPENWEATHER_API_KEY")
+    if not api_key:
+        return None
+        
+    try:
+        import requests
+        if lat and lon:
+            url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric&lang=pt_br"
+        else:
+            #vai servir p as estações que ficam fora de SP (Osasco, Suzano, Mogi...)
+            url = f"https://api.openweathermap.org/data/2.5/weather?q={cache_key}&appid={api_key}&units=metric&lang=pt_br"
+            
+        res = requests.get(url, timeout=4)
+        if res.status_code == 200:
+            dados = res.json()
+           
+            CACHE_CLIMA[cache_key] = {
+                "temp": dados["main"]["temp"],
+                "cond": dados["weather"][0]["description"].capitalize(),
+                "umidade": dados["main"]["humidity"],
+                "velocidade_vento": dados["wind"]["speed"],
+                "clima_icone": dados["weather"][0]["icon"]
+            }
+            return CACHE_CLIMA[cache_key]
+    except Exception:
+        pass
+    return None
+
+#=================================================================================================================================== 
+#=================================================================================================================================== 
+
+def processar_e_salvar_incidentes_csv(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame, bucket: str):
+    """
+    Consolida incidentes capturando o estado do hardware/ping no momento do evento,
+    enriquece geograficamente via OpenWeather por coordenadas regionais (dentro ou fora de SP) e grava em CSV por dia.
+    """
+    print("\n" + "=" * 50)
+    print("[INCIDENTES] INICIANDO PROCESSAMENTO DE EVENTOS")
+    print("=" * 50)
+    
+    incidentes_lista = []
+    # data_atual = datetime.now().strftime("%Y-%m-%d")
+    
+    #OFFLINE
+    df_offline = df_tratado[df_tratado["rbc_status"] == "OFFLINE"]
+    for row in df_offline.itertuples():
+        regiao_servidor = getattr(row, "regiao", "CENTRO") # coluna região ou assume centro de sp
+        info_clima = obter_clima_por_regiao(regiao_servidor)
+        
+        incidentes_lista.append({
+            "id_empresa": row.id_empresa, "nome_empresa": row.nome_empresa,
+            "id_linha": row.id_linha, "nome_linha": row.nome_linha,
+            "id_rbc": row.id_rbc, "nome_rbc": row.nome_rbc,
+            "tipo_incidente": "OFFLINE", "criticidade": "CRÍTICO",
+            "componente_afetado": "CONEXÃO", "descricao": "Servidor perdeu a comunicação com a central de telemetria.",
+            "data_hora_evento": row.data_hora_iso,
+            
+            # capturado no momento da queda
+            "metrica_cpu_momento": getattr(row, "percentual_uso_cpu", np.nan),
+            "metrica_ram_momento": getattr(row, "percentual_uso_ram", np.nan),
+            "metrica_disco_momento": getattr(row, "percentual_uso_disco", np.nan),
+            "metrica_ping_momento": getattr(row, "latencia_ping_ms", np.nan),
+            "score_saude_momento": getattr(row, "score_saude", np.nan),
+            
+            "limite_atencao_definido": None,
+            "limite_critico_definido": None,
+            "valor_estouro_momento": None,
+            "resumo_excesso_metrica": "Servidor inativo (Timeout de rede)",
+            
+            #preciso por coordenadas da região
+            "clima_temperatura": info_clima["temp"] if info_clima else None, 
+            "clima_condicao": info_clima["cond"] if info_clima else "Erro na Consulta",
+            "clima_umidade": info_clima["umidade"] if info_clima else None,
+            "clima_vento": info_clima["velocidade_vento"] if info_clima else None,
+            "clima_icone": info_clima["clima_icone"] if info_clima else None
+        })
+
+    #ALERTAS CRÍTICOS DE HARDWARE
+    if df_alertas is not None and not df_alertas.empty:
+        df_criticos = df_alertas[df_alertas["tipo_alerta"] == "CRITICO"]
+        for row in df_criticos.itertuples():
+            # buscando o registro original correspondente no df_tratado p pegar as outras métricas padrao
+            registro_orig = df_tratado[(df_tratado["endereco_mac"] == row.endereco_mac) & 
+                                       (df_tratado["data_hora_iso"] == row.data_hora_iso)]
+            
+            regiao_servidor = registro_orig["regiao"].iloc[0] if (not registro_orig.empty and "regiao" in registro_orig.columns) else "CENTRO"
+            info_clima = obter_clima_por_regiao(regiao_servidor)
+            
+            # métricas paralelas do hardware
+            cpu_val = registro_orig["percentual_uso_cpu"].iloc[0] if not registro_orig.empty else row.valor_medido if row.componente_afetado == "cpu" else np.nan
+            ram_val = registro_orig["percentual_uso_ram"].iloc[0] if not registro_orig.empty else row.valor_medido if row.componente_afetado == "ram" else np.nan
+            disco_val = registro_orig["percentual_uso_disco"].iloc[0] if not registro_orig.empty else row.valor_medido if row.componente_afetado == "disco" else np.nan
+            ping_val = registro_orig["latencia_ping_ms"].iloc[0] if not registro_orig.empty else row.valor_medido if row.componente_afetado == "latencia" else np.nan
+            score_val = registro_orig["score_saude"].iloc[0] if not registro_orig.empty else np.nan
+
+            #calc do excesso
+            excesso_texto = "Métrica em limite crítico"
+            if pd.notna(row.valor_medido) and pd.notna(row.limite_critico):
+                if row.valor_medido > row.limite_critico:
+                    diferenca = row.valor_medido - row.limite_critico
+                    excesso_texto = f"{diferenca:.1f}% acima do limite crítico de {row.limite_critico:.1f}%"
+
+            incidentes_lista.append({
+                "id_empresa": row.id_empresa, "nome_empresa": row.nome_empresa,
+                "id_linha": row.id_linha, "nome_linha": row.nome_linha,
+                "id_rbc": row.id_rbc, "nome_rbc": row.nome_rbc,
+                "tipo_incidente": "HARDWARE", "criticidade": "ALTO",
+                "componente_afetado": str(row.componente_afetado).upper(), "descricao": str(row.motivo_alerta).strip(),
+                "data_hora_evento": row.data_hora_iso,
+                
+                "metrica_cpu_momento": cpu_val, 
+                "metrica_ram_momento": ram_val,
+                "metrica_disco_momento": disco_val, 
+                "metrica_ping_momento": ping_val,
+                "score_saude_momento": score_val,
+            
+                "limite_atencao_definido": row.limite_atencao,
+                "limite_critico_definido": row.limite_critico,
+                "valor_estouro_momento": row.valor_medido,
+                "resumo_excesso_metrica": excesso_texto,
+                
+                "clima_temperatura": info_clima["temp"] if info_clima else None, 
+                "clima_condicao": info_clima["cond"] if info_clima else "Erro na Consulta",
+                "clima_umidade": info_clima["umidade"] if info_clima else None,
+                "clima_vento": info_clima["velocidade_vento"] if info_clima else None,
+                "clima_icone": info_clima["clima_icone"] if info_clima else None
+            })
+
+    if not incidentes_lista:
+        print("[INCIDENTES] Sem ocorrências críticas pendentes de registro para esta execução.")
+        return
+
+    #CSV
+    df_novos_incidentes = pd.DataFrame(incidentes_lista)
+    caminho_s3 = caminho_para_tratado(df_tratado, tipo="incidentes")
+    
+    df_existente = extrair_csv_s3(bucket=bucket, key=caminho_s3)
+    if df_existente is not None:
+        df_final = pd.concat([df_existente, df_novos_incidentes], ignore_index=True)
+        df_final.drop_duplicates(subset=["id_rbc", "componente_afetado", "data_hora_evento"], keep="last", inplace=True)
+    else:
+        df_final = df_novos_incidentes
+
+    try:
+        s3_client = boto3.client("s3", **cfg_s3())
+        buffer = BytesIO()
+        df_final.to_csv(buffer, index=False)
+        s3_client.put_object(Bucket=bucket, Key=caminho_s3, Body=buffer.getvalue(), ContentType="text/csv")
+        print(f"[INCIDENTES] Upload concluído: {len(df_novos_incidentes)} linhas salvas em s3://{bucket}/{caminho_s3}")
+    except Exception as e:
+        print(f"[INCIDENTES] Falha crítica de persistência no S3: {e}")
+        
+#=====================================================================================================================================        
+    
+def main():
+    """
+    Execução local para testes sem Lambda.
+    Lê S3_BUCKET e S3_KEY do .env e grava localmente para inspeção.
+    """
+    bucket = os.getenv("S3_BUCKET")
+    key    = os.getenv("S3_KEY")
 
 def reading_json(row):
     """Converte uma linha do DataFrame em um dicionário de leitura."""
@@ -732,6 +934,20 @@ def main(event):
         salvar_json_trusted(payload=payload_semanal, df_ref=df_semanal, bucket=bucket, tipo="semanal-json")
 
     if df_alertas is not None and not df_alertas.empty:
+        print("\n" + "=" * 60)
+        print("Resumo — DataFrame tratado")
+        print("=" * 60)
+        print(f"Linhas            : {len(df):,}")
+        print(f"Colunas           : {len(df.columns)}")
+        print(f"Empresas          : {df['id_empresa'].nunique(dropna=False)}")
+        print(f"Linhas de produção: {df['id_linha'].nunique(dropna=False)}")
+        print(f"RBCs              : {df['id_rbc'].nunique(dropna=False)}")
+        print(f"Alertas CRITICO   : {int(df['qte_alertas_critico'].sum())}")
+        print(f"Alertas ATENÇÃO   : {int(df['qte_alertas_atencao'].sum())}")
+        print(f"Servidores OFFLINE: {(df['rbc_status'] == 'OFFLINE').sum()}")
+        print("=" * 60)
+        
+    if df_alertas is not None :
         print("\nRegistros de alerta gerados:")
         print(
             df_alertas[[
@@ -741,6 +957,8 @@ def main(event):
         )
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")
         salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="semanal-alertas")
+        
+        processar_e_salvar_incidentes_csv(df_tratado=df, df_alertas=df_alertas, bucket=bucket)
 
     return payload_diario if df is not None else {}
 

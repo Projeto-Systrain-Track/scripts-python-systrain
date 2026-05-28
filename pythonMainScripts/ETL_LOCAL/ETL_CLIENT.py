@@ -6,6 +6,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 import json
 
@@ -160,6 +161,9 @@ def buscar_e_juntar_arquivos_s3(bucket: str):
             else:
                 print("[buscar_e_juntar_arquivos_s3] AVISO: arquivo de alerta não retornou DataFrame.")
 
+    lista_prefixos_empresas = [empresa.get("Prefix") for empresa in empresas.get("CommonPrefixes", [])]
+    
+    
     # Evita erro no pd.concat quando não houver nenhum DataFrame na lista
     if df_principal_tratado:
         df_principal_tratado = pd.concat(df_principal_tratado, ignore_index=True)
@@ -176,7 +180,7 @@ def buscar_e_juntar_arquivos_s3(bucket: str):
     print("\n[buscar_e_juntar_arquivos_s3] DataFrame tratado final:", df_principal_tratado.shape)
     print("[buscar_e_juntar_arquivos_s3] DataFrame alertas final:", df_principal_alertas.shape)
 
-    return df_principal_tratado, df_principal_alertas
+    return df_principal_tratado, df_principal_alertas, lista_prefixos_empresas
 
 def arquivo_existe(bucket: str, key: str) -> bool:
     """
@@ -271,8 +275,10 @@ def salvar_json_client(json_dashboard: dict, bucket: str, tipo: str):
     # Gera o caminho onde o arquivo será salvo no S3
     if tipo == "operacao":
         nome_arquivo = "dashboard_operacao.json"
-    elif tipo == "incidentes":
-        nome_arquivo = "dashboard_incidentes.json"
+    elif tipo.startswith("incidentes"):
+        #nome_da_empresa = tipo.replace("incidentes_", "")
+        nome_arquivo = f"dashboard_incidentes.json"
+        #nome_arquivo = f"dashboard_incidentes_{nome_da_empresa}.json"
     elif tipo == "visao_geral":
         nome_arquivo = "dashboard_visao_geral.json"
     elif tipo == "detalhe_linha":
@@ -659,6 +665,122 @@ def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
     salvar_json_client(json_dashboard=resultado, bucket=bucket, tipo="operacao")
     print("[dashboardOperacao] Arquivo saida.json salvo com sucesso.")
     print("[dashboardOperacao] Processo finalizado.")
+    
+    
+#===========================================================================================================================================
+#===========================================================================================================================================
+def dashboardIncidentes(bucket: str, prefix_empresa: str):
+    """
+    Lê o CSV da ETL 1 e gera o dashboard_incidentes.json estruturado
+    """
+    print(f"\n[dashboardIncidentes] Iniciando processamento para: {prefix_empresa}")
+    
+    s3 = boto3.client("s3", **cfg_s3())
+    
+    hoje = pd.Timestamp.now()
+    ano = hoje.year
+    mes = hoje.month
+    dia = hoje.day
+
+    caminho_incidentes = f"{prefix_empresa}{ano}/{mes}/{dia}/incidentes/"
+    
+    try:
+        lista_arquivos = s3.list_objects_v2(Bucket=bucket, Prefix=caminho_incidentes)
+        if "Contents" not in lista_arquivos:
+            print(f"[dashboardIncidentes] AVISO: Nenhum arquivo encontrado em {caminho_incidentes}")
+            return
+        
+        key_seu_csv = lista_arquivos["Contents"][0]["Key"]
+        resposta = s3.get_object(Bucket=bucket, Key=key_seu_csv)
+        df_incidentes = pd.read_csv(BytesIO(resposta["Body"].read()))
+        
+    except Exception as e:
+        print(f"[dashboardIncidentes] Erro ao ler seu CSV do S3: {e}")
+        return
+
+    if df_incidentes.empty:
+        return
+
+    incidentes_lista = []
+    total_alto, total_medio, total_baixo = 0, 0, 0
+    
+    for row in df_incidentes.itertuples():
+        
+        #vai definir o badge de prioridade
+        score_atual = float(getattr(row, "score_saude_momento", 0))
+        if score_atual >= 80.0:
+            nivel_formatado = "Alto"
+            total_alto += 1
+        elif score_atual >= 50.0:
+            nivel_formatado = "Médio"
+            total_medio += 1
+        else:
+            nivel_formatado = "Baixo"
+            total_baixo += 1
+            
+        data_hora_bruta = str(getattr(row, "data_hora_evento", ""))
+        horario_formatado = data_hora_bruta.split(" ")[1].split(".")[0] if " " in data_hora_bruta else data_hora_bruta
+
+        vento_ms = float(row.clima_vento) if hasattr(row, "clima_vento") and pd.notna(row.clima_vento) else 0.0
+        vento_kmh = vento_ms * 3.6
+        
+        componente_gatilho = str(getattr(row, "componente_afetado", "GERAL")).upper()
+
+        incidentes_lista.append({
+            #partw q alimenta o front
+            "detalhes_tela": {
+                "statusSLA": "risco" if nivel_formatado == "Alto" else "atencao",
+                "titulo": str(getattr(row, "descricao", "Alerta operacional")),
+                "linha": str(getattr(row, "nome_linha", "Linha Desconhecida")),
+                "nivel": nivel_formatado,
+                "horario": horario_formatado,
+                "descricao": str(getattr(row, "resumo_excesso_metrica", "Métrica fora dos limites")),
+                "responsavel": "NAO ATRIBUIDO",
+                "status": "ABERTO",
+                "componente": componente_gatilho,
+                "tipo": str(getattr(row, "tipo_incidente", "HARDWARE")),
+                "clima": {
+                    "temperatura": float(row.clima_temperatura) if hasattr(row, "clima_temperatura") and pd.notna(row.clima_temperatura) else None,
+                    "condicao": str(getattr(row, "clima_condicao", "Sem Registro")),
+                    "vento_kmh": f"{vento_kmh:.1f}km/h",
+                    "icone": str(getattr(row, "clima_icone", ""))
+                }
+            },
+            
+            "metricas_formatadas": {
+                    "cpu": f"{float(getattr(row, 'metrica_cpu_momento', 0)):.1f}%",
+                    "ram": f"{float(getattr(row, 'metrica_ram_momento', 0)):.1f}%",
+                    "disco": f"{float(getattr(row, 'metrica_disco_momento', 0)):.1f}%",
+                    "latencia": f"{int(getattr(row, 'metrica_ping_momento', 0))} ms",
+                    "disparo": str(getattr(row, "resumo_excesso_metrica", "Métrica fora dos limites"))
+                },   
+            #dados cru do incidente
+            "dados_brutos": {
+                "id_rbc": int(getattr(row, "id_rbc", 0)),
+                "nome_rbc": str(getattr(row, "nome_rbc", "Desconhecido")),
+                "score_saude_original": score_atual,
+                "data_hora_completa": data_hora_bruta
+            }
+        })
+
+    resultado_json = {
+        "atualizado_em": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "resumo_cards": {
+            "total_incidentes_dia": len(incidentes_lista),
+            "incidentes_abertos": len(incidentes_lista),         
+            "incidentes_sem_responsavel": len(incidentes_lista),  
+            "sla_em_risco": len([i for i in incidentes_lista if i["detalhes_tela"]["statusSLA"] == "risco"]),                                    
+            "impacto_alto": total_alto,
+            "impacto_medio": total_medio,
+            "impacto_baixo": total_baixo
+        },
+        "lista_incidentes": incidentes_lista
+    }
+
+    nome_da_empresa = prefix_empresa.split("/")[1] 
+    #salvar_json_client(json_dashboard=resultado_json, bucket=bucket, tipo=f"incidentes_{nome_da_empresa}")  
+    salvar_json_client(json_dashboard=resultado_json, bucket=bucket, tipo=f"incidentes")  
+#==============================================================================================================================================    
 
 
 def main(event):
@@ -678,13 +800,18 @@ def main(event):
     if not bucket:
         raise ValueError("Variável de ambiente S3_BUCKET não encontrada.")
 
-    df_principal_tratado, df_principal_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
+    df_principal_tratado, df_principal_alertas, empresas_encontradas = buscar_e_juntar_arquivos_s3(bucket=bucket)
 
     print("[main] Chamando dashboardOperacao...")
     dashboardOperacao(
         df_tratado=df_principal_tratado,
         df_alertas=df_principal_alertas
     )
+    
+    print("\n[main] Chamando dashboardIncidentes...")
+    for prefixo in empresas_encontradas:
+        dashboardIncidentes(bucket=bucket, prefix_empresa=prefixo)
+    
 
 def lambda_handler(event, context):
     try:
