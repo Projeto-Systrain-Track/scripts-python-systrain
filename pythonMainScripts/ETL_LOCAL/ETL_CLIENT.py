@@ -9,708 +9,464 @@ import pandas as pd
 from dotenv import load_dotenv
 import json
 
-# Carrega as variáveis do arquivo .env para o ambiente do Python.
-# Exemplo esperado no .env:
-# AWS_ACCESS_KEY_ID=...
-# AWS_SECRET_ACCESS_KEY=...
-# AWS_SESSION_TOKEN=...
-# S3_BUCKET=...
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+TEMPO_COLETA   = 5    # segundos entre coletas esperadas
+TOLERANCIA     = 30   # segundos de tolerância antes de considerar gap
+CUSTO_SEGUNDO  = 31.25
+
+
+# ---------------------------------------------------------------------------
+# AWS / S3 helpers
+# ---------------------------------------------------------------------------
 
 def cfg_s3() -> dict:
-    """
-    Monta o dicionário de configuração usado pelo boto3 para acessar o S3.
-
-    OBS:
-    - As credenciais vêm das variáveis de ambiente.
-    - Se alguma variável estiver vazia, o boto3 pode falhar ao tentar acessar o bucket.
-    """
-    print("[cfg_s3] Lendo credenciais AWS das variáveis de ambiente...")
-
-    config = {
-        "region_name": "us-east-1",
-        "aws_access_key_id": os.getenv("AWS_ACCESS_KEY_ID"),
+    """Monta o dicionário de configuração usado pelo boto3 para acessar o S3."""
+    return {
+        "region_name":           "us-east-1",
+        "aws_access_key_id":     os.getenv("AWS_ACCESS_KEY_ID"),
         "aws_secret_access_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
-        "aws_session_token": os.getenv("AWS_SESSION_TOKEN"),
+        "aws_session_token":     os.getenv("AWS_SESSION_TOKEN"),
     }
 
-    print("[cfg_s3] Região configurada:", config["region_name"])
-    print("[cfg_s3] Access key encontrada?", bool(config["aws_access_key_id"]))
-    print("[cfg_s3] Secret key encontrada?", bool(config["aws_secret_access_key"]))
-    print("[cfg_s3] Session token encontrado?", bool(config["aws_session_token"]))
 
-    return config
+def arquivo_existe(bucket: str, key: str) -> bool:
+    """Retorna True se o objeto existir no S3, False se não (404)."""
+    s3 = boto3.client("s3", **cfg_s3())
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            return False
+        raise
 
 
 def limpar_mac(valor: Any) -> Any:
-    """
-    Padroniza o endereço MAC.
-
-    O padrão usado no código é:
-    - minúsculo
-    - sem espaços no começo/fim
-    - usando hífen no lugar de dois-pontos
-
-    Exemplo:
-    '0C:CC:47:E3:5F:90' vira '0c-cc-47-e3-5f-90'
-    """
+    """Padroniza o endereço MAC: minúsculo, hífens, sem espaços."""
     if pd.isna(valor):
         return valor
-
-    mac_limpo = str(valor).strip().lower().replace(":", "-")
-    return mac_limpo
-
-
-def buscar_e_juntar_arquivos_s3(bucket: str):
-    """
-    Busca arquivos dentro do bucket S3 e junta tudo em dois DataFrames:
-
-    1. df_principal_tratado:
-       Arquivos CSV semanais dentro de:
-       trusted/<empresa>/semanal/
-
-    2. df_principal_alertas:
-       Arquivos CSV de alertas abertos do dia atual dentro de:
-       trusted/<empresa>/<ano>/<mes>/<dia>/alertas/abertos/
-
-    Retorna:
-    - df_principal_tratado
-    - df_principal_alertas
-    """
-    print("\n[buscar_e_juntar_arquivos_s3] Iniciando busca no S3...")
-    print("[buscar_e_juntar_arquivos_s3] Bucket recebido:", bucket)
-
-    s3 = boto3.client("s3", **cfg_s3())
-
-    # Lista as "pastas" de empresas dentro de trusted/
-    empresas = s3.list_objects_v2(Bucket=bucket, Prefix="trusted/", Delimiter="/")
-
-    print("[buscar_e_juntar_arquivos_s3] Empresas encontradas:")
-    for empresa in empresas.get("CommonPrefixes", []):
-        print(" -", empresa.get("Prefix"))
-
-    df_principal_tratado = []
-    df_principal_alertas = []
-
-    # Percorre cada empresa encontrada no S3
-    for empresa in empresas.get("CommonPrefixes", []):
-        prefix_empresa = empresa.get("Prefix")
-
-        print("\n[buscar_e_juntar_arquivos_s3] Processando empresa/prefixo:", prefix_empresa)
-
-        # Caminho dos arquivos semanais tratados
-        caminho_semanal = f"{prefix_empresa}semanal/tratados/"
-        print("[buscar_e_juntar_arquivos_s3] Caminho semanal:", caminho_semanal)
-
-        arquivos_semanal = s3.list_objects_v2(
-            Bucket=bucket,
-            Prefix=caminho_semanal,
-            Delimiter="/"
-        )
-
-        # Pega a data atual para montar o caminho dos alertas do dia
-        hoje = pd.Timestamp.now()
-        ano = hoje.year
-        mes = hoje.month
-        dia = hoje.day
-
-        # Caminho dos alertas abertos do dia
-        caminho_alertas = f"{prefix_empresa}semanal/alertas/"
-        print("[buscar_e_juntar_arquivos_s3] Caminho alertas:", caminho_alertas)
-
-        arquivos_alertas = s3.list_objects_v2(
-            Bucket=bucket,
-            Prefix=caminho_alertas,
-            Delimiter="/"
-        )
-
-        print(
-            "[buscar_e_juntar_arquivos_s3] Qtd arquivos semanais:",
-            len(arquivos_semanal.get("Contents", []))
-        )
-        print(
-            "[buscar_e_juntar_arquivos_s3] Qtd arquivos de alertas:",
-            len(arquivos_alertas.get("Contents", []))
-        )
-
-        # Lê e adiciona cada arquivo semanal tratado
-        for arquivo_tratado in arquivos_semanal.get("Contents", []):
-            key_semanal = arquivo_tratado.get("Key")
-            print("[buscar_e_juntar_arquivos_s3] Lendo CSV semanal:", key_semanal)
-
-            df_tratado = extrair_csv_s3(bucket=bucket, key=key_semanal)
-
-            if df_tratado is not None:
-                print("[buscar_e_juntar_arquivos_s3] Linhas lidas no tratado:", len(df_tratado))
-                df_principal_tratado.append(df_tratado)
-            else:
-                print("[buscar_e_juntar_arquivos_s3] AVISO: arquivo semanal não retornou DataFrame.")
-
-        # Lê e adiciona cada arquivo de alerta aberto
-        for arquivo_alerta in arquivos_alertas.get("Contents", []):
-            key_alerta = arquivo_alerta.get("Key")
-            print("[buscar_e_juntar_arquivos_s3] Lendo CSV de alerta:", key_alerta)
-
-            df_alertas = extrair_csv_s3(bucket=bucket, key=key_alerta)
-
-            if df_alertas is not None:
-                print("[buscar_e_juntar_arquivos_s3] Linhas lidas em alertas:", len(df_alertas))
-                df_principal_alertas.append(df_alertas)
-            else:
-                print("[buscar_e_juntar_arquivos_s3] AVISO: arquivo de alerta não retornou DataFrame.")
-
-    # Evita erro no pd.concat quando não houver nenhum DataFrame na lista
-    if df_principal_tratado:
-        df_principal_tratado = pd.concat(df_principal_tratado, ignore_index=True)
-    else:
-        print("[buscar_e_juntar_arquivos_s3] AVISO: nenhum arquivo tratado encontrado.")
-        df_principal_tratado = pd.DataFrame()
-
-    if df_principal_alertas:
-        df_principal_alertas = pd.concat(df_principal_alertas, ignore_index=True)
-    else:
-        print("[buscar_e_juntar_arquivos_s3] AVISO: nenhum arquivo de alerta encontrado.")
-        df_principal_alertas = pd.DataFrame()
-
-    print("\n[buscar_e_juntar_arquivos_s3] DataFrame tratado final:", df_principal_tratado.shape)
-    print("[buscar_e_juntar_arquivos_s3] DataFrame alertas final:", df_principal_alertas.shape)
-
-    return df_principal_tratado, df_principal_alertas
-
-def arquivo_existe(bucket: str, key: str) -> bool:
-    """
-    Verifica se um arquivo existe no S3 usando head_object.
-
-    Retorna:
-    - True se existir
-    - False se não existir
-    - relança erro se for outro problema diferente de 404
-    """
-    print(f"[arquivo_existe] Verificando se existe: s3://{bucket}/{key}")
-
-    s3 = boto3.client("s3", **cfg_s3())
-
-    try:
-        s3.head_object(Bucket=bucket, Key=key)
-        print("[arquivo_existe] Arquivo encontrado.")
-        return True
-
-    except ClientError as e:
-        codigo_erro = e.response["Error"]["Code"]
-        print("[arquivo_existe] Erro recebido:", codigo_erro)
-
-        if codigo_erro == "404":
-            print("[arquivo_existe] Arquivo não existe.")
-            return False
-
-        # Se for outro erro, como permissão ou credencial, não escondemos o problema
-        raise e
+    return str(valor).strip().lower().replace(":", "-")
 
 
 def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame | None:
     """
-    Baixa um CSV do S3, transforma em DataFrame e faz tratamentos básicos:
-
-    - Verifica se o arquivo existe.
-    - Lê o conteúdo em bytes.
-    - Converte para DataFrame com pandas.
-    - Valida colunas obrigatórias.
-    - Limpa endereço MAC.
-    - Converte data_hora_iso para datetime.
+    Baixa um CSV do S3 e devolve um DataFrame com tratamentos básicos.
+    Retorna None se o arquivo não existir.
     """
-    print(f"\n[extrair_csv_s3] Preparando extração do CSV: s3://{bucket}/{key}")
-
-    s3 = boto3.client("s3", **cfg_s3())
-
-    verificar_existe = arquivo_existe(bucket=bucket, key=key)
-
-    if not verificar_existe:
-        print("[extrair_csv_s3] Arquivo não encontrado. Retornando None.")
+    if not arquivo_existe(bucket=bucket, key=key):
+        print(f"[extrair_csv_s3] Não encontrado: s3://{bucket}/{key}")
         return None
 
-    print("[extrair_csv_s3] Baixando arquivo do S3...")
+    s3 = boto3.client("s3", **cfg_s3())
     resposta = s3.get_object(Bucket=bucket, Key=key)
-
     conteudo = resposta["Body"].read()
-    print(f"[extrair_csv_s3] Bytes recebidos: {len(conteudo):,}")
+    print(f"[extrair_csv_s3] {len(conteudo):,} bytes — s3://{bucket}/{key}")
 
     df = pd.read_csv(BytesIO(conteudo))
-    print("[extrair_csv_s3] DataFrame carregado com shape:", df.shape)
-    print("[extrair_csv_s3] Colunas encontradas:", list(df.columns))
 
-    # Colunas mínimas necessárias para esse script conseguir tratar o CSV
-    obrigatorias = ["endereco_mac", "data_hora_iso"]
-
-    # Lista quais colunas obrigatórias estão faltando
-    ausentes = [c for c in obrigatorias if c not in df.columns]
-
+    ausentes = [c for c in ["endereco_mac", "data_hora_iso"] if c not in df.columns]
     if ausentes:
         raise ValueError(f"Colunas obrigatórias ausentes no CSV: {ausentes}")
 
-    # Normaliza o MAC
-    df["endereco_mac"] = df["endereco_mac"].map(limpar_mac)
-
-    # Converte a data ISO para datetime.
-    # errors="coerce" transforma valores inválidos em NaT.
+    df["endereco_mac"]  = df["endereco_mac"].map(limpar_mac)
     df["data_hora_iso"] = pd.to_datetime(df["data_hora_iso"], errors="coerce")
 
-    print(
-        f"[extrair_csv_s3] {len(df):,} linhas | "
-        f"{df['endereco_mac'].nunique()} MAC(s) único(s)."
+    print(f"[extrair_csv_s3] {len(df):,} linhas | {df['endereco_mac'].nunique()} MAC(s).")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# S3 reader — trusted/
+# ---------------------------------------------------------------------------
+
+def buscar_e_juntar_arquivos_s3(bucket: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Varre trusted/<empresa>/semanal/ e devolve dois DataFrames:
+
+    df_tratado  → trusted/<empresa>/semanal/tratados/*.csv
+    df_alertas  → trusted/<empresa>/semanal/alertas/*.csv
+    """
+    print("\n[buscar] Iniciando busca em trusted/ ...")
+    s3 = boto3.client("s3", **cfg_s3())
+
+    empresas_resp = s3.list_objects_v2(
+        Bucket=bucket, Prefix="trusted/", Delimiter="/"
+    )
+    prefixos = [p["Prefix"] for p in empresas_resp.get("CommonPrefixes", [])]
+    print(f"[buscar] {len(prefixos)} empresa(s) encontrada(s).")
+
+    listas_tratados: list[pd.DataFrame] = []
+    listas_alertas:  list[pd.DataFrame] = []
+
+    for prefix_empresa in prefixos:
+        for subtipo, lista_destino in [
+            ("tratados", listas_tratados),
+            ("alertas",  listas_alertas),
+        ]:
+            prefixo = f"{prefix_empresa}semanal/{subtipo}/"
+            resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefixo)
+            arquivos = resp.get("Contents", [])
+            print(f"[buscar] {prefixo} → {len(arquivos)} arquivo(s).")
+
+            for obj in arquivos:
+                df = extrair_csv_s3(bucket=bucket, key=obj["Key"])
+                if df is not None:
+                    lista_destino.append(df)
+
+    df_tratado = (
+        pd.concat(listas_tratados, ignore_index=True)
+        if listas_tratados else pd.DataFrame()
+    )
+    df_alertas = (
+        pd.concat(listas_alertas, ignore_index=True)
+        if listas_alertas else pd.DataFrame()
     )
 
-    qtd_datas_invalidas = df["data_hora_iso"].isna().sum()
-    print("[extrair_csv_s3] Datas inválidas em data_hora_iso:", qtd_datas_invalidas)
+    print(f"[buscar] df_tratado: {df_tratado.shape} | df_alertas: {df_alertas.shape}")
+    return df_tratado, df_alertas
+
+
+# ---------------------------------------------------------------------------
+# S3 writer — client/
+# ---------------------------------------------------------------------------
+
+def _slug_empresa(nome: str) -> str:
+    return str(nome).strip().replace(" ", "_").lower()
+
+
+def caminho_client(nome_empresa: str, tipo: str) -> str:
+    """
+    Gera o caminho S3 dentro de client/.
+
+    Paths produzidos:
+      client/{empresa}/dashboard_operacao.json
+      client/{empresa}/dashboard_incidentes.json
+      client/{empresa}/dashboard_visao_geral.json
+      client/{empresa}/dashboard_detalhe_linha.json
+    """
+    slug = _slug_empresa(nome_empresa)
+    nomes = {
+        "operacao":     "dashboard_operacao.json",
+        "incidentes":   "dashboard_incidentes.json",
+        "visao_geral":  "dashboard_visao_geral.json",
+        "detalhe_linha":"dashboard_detalhe_linha.json",
+    }
+    if tipo not in nomes:
+        raise ValueError(f"Tipo de dashboard desconhecido: {tipo!r}")
+    return f"client/{slug}/{nomes[tipo]}"
+
+
+def salvar_json_client(payload: dict, bucket: str, nome_empresa: str, tipo: str) -> bool:
+    """
+    Serializa `payload` como JSON e faz upload para
+    client/{nome_empresa}/dashboard_{tipo}.json.
+
+    Parâmetros
+    ----------
+    payload       : dicionário já montado pelo builder
+    bucket        : nome do bucket S3
+    nome_empresa  : usado para derivar o sub-prefixo dentro de client/
+    tipo          : chave de dashboard ('operacao', 'incidentes', etc.)
+    """
+    caminho = caminho_client(nome_empresa=nome_empresa, tipo=tipo)
+    print(f"[JSON] Salvando: s3://{bucket}/{caminho}")
+
+    nome_local = caminho.replace("/", "_")
+    with open(nome_local, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+
+    s3 = boto3.client("s3", **cfg_s3())
+    try:
+        s3.upload_file(
+            Filename=nome_local,
+            Bucket=bucket,
+            Key=caminho,
+            ExtraArgs={"ContentType": "application/json"},
+        )
+        print(f"[JSON] Upload concluído: s3://{bucket}/{caminho}")
+        return True
+    except Exception as e:
+        print(f"[JSON] Erro no upload: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Dashboard builder
+# ---------------------------------------------------------------------------
+
+def _estrutura_resumo_empresa(nome_empresa: str) -> dict:
+    return {
+        "nome": nome_empresa,
+        "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "resumo": {
+            "custo_opex_desperdicado_semana": 0.0,
+            "qte_alertas_semana":             0,
+            "alertas_por_motivo":             {},
+            "tipo_alertas":                   {},
+        },
+        "dias":               {},
+        "linhas":             {},
+        "custo_ao_longo_tempo": [],
+    }
+
+
+def _estrutura_resumo_linha(nome_linha: str) -> dict:
+    return {
+        "nome": nome_linha,
+        "resumo": {
+            "custo_opex_desperdicado": 0.0,
+            "qte_alertas":             0,
+            "alertas_por_motivo":      {},
+            "tipo_alertas":            {},
+        },
+        "dias":       {},
+        "servidores": {},
+    }
+
+
+def _estrutura_resumo_rbc(nome_rbc: str) -> dict:
+    return {
+        "nome": nome_rbc,
+        "resumo": {
+            "custo_opex_desperdicado": 0.0,
+            "qte_alertas":             0,
+            "alertas_por_motivo":      {},
+            "tipo_alertas":            {},
+        },
+        "dias": {},
+    }
+
+
+def _estrutura_dia(dia_semana: str) -> dict:
+    return {
+        "dia_semana":             str(dia_semana),
+        "custo_opex_desperdicado": 0.0,
+        "qte_alertas":             0,
+        "alertas_por_motivo":      {},
+        "tipo_alertas":            {},
+    }
+
+
+def _calcular_custo(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Acrescenta a coluna `custo_desperdicado` ao DataFrame de leituras tratadas.
+    Lógica: detecta gaps entre envios consecutivos do mesmo RBC e multiplica
+    os segundos excedentes pelo custo por segundo.
+    """
+    df = df.copy()
+    df["data_hora_envio"] = pd.to_datetime(df["data_hora_envio"], errors="coerce")
+    df = df.sort_values(["id_empresa", "id_linha", "id_rbc", "data_hora_envio"])
+
+    df["diff_envio_segundos"] = (
+        df.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
+        .diff()
+        .dt.total_seconds()
+    )
+
+    df["segundos_excesso"] = (
+        df["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
+    ).clip(lower=0)
+
+    df["qtd_servidores"] = df.groupby(["id_empresa", "id_linha"])["id_rbc"].transform("nunique")
+
+    df["custo_desperdicado"] = (
+        df["segundos_excesso"] * CUSTO_SEGUNDO / df["qtd_servidores"]
+    )
 
     return df
 
-def salvar_json_client(json_dashboard: dict, bucket: str, tipo: str):
-    
-    print("Iniciando processo de salvamento do CSV...")
-    # Gera o caminho onde o arquivo será salvo no S3
-    if tipo == "operacao":
-        nome_arquivo = "dashboard_operacao.json"
-    elif tipo == "incidentes":
-        nome_arquivo = "dashboard_incidentes.json"
-    elif tipo == "visao_geral":
-        nome_arquivo = "dashboard_visao_geral.json"
-    elif tipo == "detalhe_linha":
-        nome_arquivo = "dashboard_detalhe_linha.json"
-    else:
-        print("Sem tipo de arquivo!")
-        return
-    
-    caminho = f"client/{nome_arquivo}"
 
-    print(f"Salvando JSON localmente como: {nome_arquivo}")
-    
-    # Salva o resultado final em JSON
-    with open(f"{nome_arquivo}", "w", encoding="utf-8") as f:
-        json.dump(json_dashboard, f, indent=2, ensure_ascii=False)
-
-    print("JSON salvo localmente com sucesso!")
-    print("Criando cliente S3...")
-    s3 = boto3.client("s3", **cfg_s3())
-    print(f"Enviando arquivo para bucket '{bucket}'...")
-    try:
-        s3.upload_file(
-            Filename=nome_arquivo,
-            Bucket=bucket,
-            Key=caminho
-        )
-        print("Upload realizado com sucesso!")
-        print("Removendo arquivo local temporário...")
-        print("Arquivo local removido!")
-        return True
-    except Exception as e:
-        print("Erro ao tentar subir o arquivo: ", e)
-    return False
-def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame):
+def dashboardOperacao(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame, bucket: str):
+    """
+    Constrói o dashboard de operação e salva um JSON por empresa em
+    client/{nome_empresa}/dashboard_operacao.json.
+    """
     if df_tratado.empty:
-        print("[dashboardOperacao] ERRO: df_tratado está vazio. Não há dados para processar.")
+        print("[dashboardOperacao] df_tratado vazio — nada a processar.")
         return
-    df_tratado["data_hora_envio"] = pd.to_datetime(
-        df_tratado["data_hora_envio"],
-        errors="coerce"
-    )
-    df_tratado = df_tratado.sort_values(
-        ["id_empresa", "id_linha", "id_rbc", "data_hora_envio"]
-    )
-    df_tratado["diff_envio_segundos"] = (
-        df_tratado.groupby(["id_empresa", "id_linha", "id_rbc"])["data_hora_envio"]
-        .diff()
-    ).dt.total_seconds()
-    TEMPO_COLETA = 5
-    TOLERANCIA = 30
-    CUSTO_SEGUNDO = 31.25
-    df_tratado["segundos_excesso"] = (
-        df_tratado["diff_envio_segundos"] - TEMPO_COLETA - TOLERANCIA
-    ).clip(lower=0)
-    print("[dashboardOperacao] Coluna segundos_excesso criada.")
 
-    df_tratado["qtd_servidores"] = df_tratado.groupby(
-        ["id_empresa", "id_linha"]
-    )["id_rbc"].transform("nunique")
+    df_tratado = _calcular_custo(df_tratado)
+    resultado: dict = {}
 
-    print("[dashboardOperacao] Coluna qtd_servidores criada.")
+    # ── Custo por empresa / linha / rbc / dia ─────────────────────────────
+    for (id_empresa, nome_empresa), df_emp in df_tratado.groupby(["id_empresa", "nome_empresa"]):
 
-    df_tratado["custo_desperdicado"] = (
-        df_tratado["segundos_excesso"] * CUSTO_SEGUNDO / df_tratado["qtd_servidores"]
-    )
+        resultado[id_empresa] = _estrutura_resumo_empresa(nome_empresa)
+        resultado[id_empresa]["resumo"]["custo_opex_desperdicado_semana"] = float(
+            df_emp["custo_desperdicado"].sum()
+        )
 
-    print("[dashboardOperacao] Coluna custo_desperdicado criada.")
-    print("[dashboardOperacao] Custo total calculado:", df_tratado["custo_desperdicado"].sum())
-    print("[dashboardOperacao] Arquivo df_tratado.csv salvo.")
-
-    resultado = {}
-
-    for (id_empresa, nome_empresa), df_tratado_empresa in df_tratado.groupby(["id_empresa", "nome_empresa"]):
-        print(f"\n[dashboardOperacao] Processando empresa {id_empresa} - {nome_empresa}")
-
-        custo_empresa = df_tratado_empresa["custo_desperdicado"].sum()
-        print("[dashboardOperacao] Custo total da empresa:", custo_empresa)
-
-        resultado[id_empresa] = {
-            "nome": nome_empresa,
-            "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "resumo": {
-                "custo_opex_desperdicado_semana": float(custo_empresa),
-                "qte_alertas_semana": 0,
-                "alertas_por_motivo": {},
-                "tipo_alertas": {}
-            },
-            "dias": {},
-            "linhas": {},
-            "custo_ao_longo_tempo": []
-        }
-
-        df_tratado_lote_custo = (
-            df_tratado_empresa
-            .groupby(["data_hora_envio"], as_index=False)
+        # Série temporal de custo
+        serie = (
+            df_emp.groupby("data_hora_envio", as_index=False)
             .agg(
                 custo_desperdicado=("custo_desperdicado", "sum"),
-                objetivoFinanceiro=("objetivoFinanceiro", "mean")
+                objetivoFinanceiro=("objetivoFinanceiro", "mean"),
             )
             .sort_values("data_hora_envio")
         )
-
-        print(
-            "[dashboardOperacao] Pontos no gráfico custo_ao_longo_tempo:",
-            len(df_tratado_lote_custo)
-        )
-
         resultado[id_empresa]["custo_ao_longo_tempo"] = [
             {
-                "data": str(linha["data_hora_envio"]),
-                "custo_opex_desperdicado": float(linha["custo_desperdicado"]),
-                "objetivoFinanceiro": float(linha["objetivoFinanceiro"])
+                "data":                    str(r["data_hora_envio"]),
+                "custo_opex_desperdicado": float(r["custo_desperdicado"]),
+                "objetivoFinanceiro":      float(r["objetivoFinanceiro"]),
             }
-            for indice, linha in df_tratado_lote_custo.iterrows()
+            for _, r in serie.iterrows()
         ]
 
-        for dia, df_diario_empresa in df_tratado_empresa.groupby(df_tratado_empresa["data_hora_envio"].dt.date):
-            data = str(dia)
+        # Por dia (empresa)
+        for dia, df_dia in df_emp.groupby(df_emp["data_hora_envio"].dt.date):
+            data       = str(dia)
             dia_semana = pd.Timestamp(dia).day_name()
-            custo_dia = df_diario_empresa["custo_desperdicado"].sum()
+            resultado[id_empresa]["dias"].setdefault(data, _estrutura_dia(dia_semana))
+            resultado[id_empresa]["dias"][data]["custo_opex_desperdicado"] = float(
+                df_dia["custo_desperdicado"].sum()
+            )
 
-            print(f"[dashboardOperacao] Empresa {id_empresa} | Dia {data} | Custo {custo_dia}")
+        # Por linha
+        for (id_linha, nome_linha), df_lin in df_emp.groupby(["id_linha", "nome_linha"]):
+            resultado[id_empresa]["linhas"].setdefault(
+                id_linha, _estrutura_resumo_linha(nome_linha)
+            )
+            resultado[id_empresa]["linhas"][id_linha]["resumo"]["custo_opex_desperdicado"] = float(
+                df_lin["custo_desperdicado"].sum()
+            )
 
-            if data not in resultado[id_empresa]["dias"]:
-                resultado[id_empresa]["dias"][data] = {
-                    "dia_semana": str(dia_semana),
-                    "custo_opex_desperdicado": 0.0,
-                    "qte_alertas": 0,
-                    "alertas_por_motivo": {},
-                    "tipo_alertas": {}
-                }
-
-            resultado[id_empresa]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia)
-
-        for (id_linha, nome_linha), df_tratado_linha in df_tratado_empresa.groupby(["id_linha", "nome_linha"]):
-            print(f"[dashboardOperacao] Processando linha {id_linha} - {nome_linha}")
-
-            custo_linha = df_tratado_linha["custo_desperdicado"].sum()
-
-            resultado[id_empresa]["linhas"][id_linha] = {
-                "nome": nome_linha,
-                "resumo": {
-                    "custo_opex_desperdicado": float(custo_linha),
-                    "qte_alertas": 0,
-                    "alertas_por_motivo": {},
-                    "tipo_alertas": {}
-                },
-                "dias": {},
-                "servidores": {}
-            }
-
-            print("[dashboardOperacao] Custo total da linha:", custo_linha)
-
-            for dia, df_diario_linha in df_tratado_linha.groupby(df_tratado_linha["data_hora_envio"].dt.date):
-                data = str(dia)
+            for dia, df_dia_lin in df_lin.groupby(df_lin["data_hora_envio"].dt.date):
+                data       = str(dia)
                 dia_semana = pd.Timestamp(dia).day_name()
-                custo_dia = df_diario_linha["custo_desperdicado"].sum()
+                resultado[id_empresa]["linhas"][id_linha]["dias"].setdefault(
+                    data, _estrutura_dia(dia_semana)
+                )
+                resultado[id_empresa]["linhas"][id_linha]["dias"][data]["custo_opex_desperdicado"] = float(
+                    df_dia_lin["custo_desperdicado"].sum()
+                )
 
-                print(f"[dashboardOperacao] Linha {id_linha} | Dia {data} | Custo {custo_dia}")
+            # Por RBC
+            for (id_rbc, nome_rbc), df_rbc in df_lin.groupby(["id_rbc", "nome_rbc"]):
+                resultado[id_empresa]["linhas"][id_linha]["servidores"].setdefault(
+                    id_rbc, _estrutura_resumo_rbc(nome_rbc)
+                )
+                resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"][
+                    "custo_opex_desperdicado"
+                ] = float(df_rbc["custo_desperdicado"].sum())
 
-                if data not in resultado[id_empresa]["linhas"][id_linha]["dias"]:
-                    resultado[id_empresa]["linhas"][id_linha]["dias"][data] = {
-                        "dia_semana": str(dia_semana),
-                        "custo_opex_desperdicado": 0.0,
-                        "qte_alertas": 0,
-                        "alertas_por_motivo": {},
-                        "tipo_alertas": {}
-                    }
-
-                resultado[id_empresa]["linhas"][id_linha]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia)
-
-            for (id_rbc, nome_rbc), df_tratado_rbc in df_tratado_linha.groupby(["id_rbc", "nome_rbc"]):
-                custo_rbc = df_tratado_rbc["custo_desperdicado"].sum()
-                print(f"[dashboardOperacao] RBC {id_rbc} - {nome_rbc} | Custo {custo_rbc}")
-
-                resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
-                    "nome": nome_rbc,
-                    "resumo": {
-                        "custo_opex_desperdicado": float(custo_rbc),
-                        "qte_alertas": 0,
-                        "alertas_por_motivo": {},
-                        "tipo_alertas": {}
-                    },
-                    "dias": {}
-                }
-
-                for dia, df_diario_rbc in df_tratado_rbc.groupby(df_tratado_rbc["data_hora_envio"].dt.date):
-                    data = str(dia)
+                for dia, df_dia_rbc in df_rbc.groupby(df_rbc["data_hora_envio"].dt.date):
+                    data       = str(dia)
                     dia_semana = pd.Timestamp(dia).day_name()
-                    custo_dia_rbc = df_diario_rbc["custo_desperdicado"].sum()
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"].setdefault(
+                        data, _estrutura_dia(dia_semana)
+                    )
+                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data][
+                        "custo_opex_desperdicado"
+                    ] = float(df_dia_rbc["custo_desperdicado"].sum())
 
-                    print(f"[dashboardOperacao] RBC {id_rbc} | Dia {data} | Custo {custo_dia_rbc}")
-
-                    if data not in resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"]:
-                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data] = {
-                            "dia_semana": str(dia_semana),
-                            "custo_opex_desperdicado": 0.0,
-                            "qte_alertas": 0,
-                            "alertas_por_motivo": {},
-                            "tipo_alertas": {}
-                        }
-
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["custo_opex_desperdicado"] = float(custo_dia_rbc)
-
-    print("\n[dashboardOperacao] Iniciando leitura dos alertas...")
-
-    if df_alertas.empty:
-        print("[dashboardOperacao] Nenhum alerta encontrado para processar.")
-    else:
+    # ── Alertas ───────────────────────────────────────────────────────────
+    if not df_alertas.empty:
+        df_alertas = df_alertas.copy()
         df_alertas["data_hora_iso"] = pd.to_datetime(df_alertas["data_hora_iso"], errors="coerce")
 
-        for (id_empresa, nome_empresa), df_empresa_alertas in df_alertas.groupby(["id_empresa", "nome_empresa"]):
-            print(f"[dashboardOperacao] Alertas da empresa {id_empresa} - {nome_empresa}")
+        for (id_empresa, nome_empresa), df_emp_al in df_alertas.groupby(["id_empresa", "nome_empresa"]):
 
             if id_empresa not in resultado:
-                resultado[id_empresa] = {
-                    "nome": nome_empresa,
-                    "data_hora": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "resumo": {
-                        "custo_opex_desperdicado_semana": 0.0,
-                        "qte_alertas_semana": 0,
-                        "alertas_por_motivo": {},
-                        "tipo_alertas": {}
-                    },
-                    "dias": {},
-                    "linhas": {},
-                    "custo_ao_longo_tempo": []
-                }
+                resultado[id_empresa] = _estrutura_resumo_empresa(nome_empresa)
 
-            resultado[id_empresa]["resumo"]["qte_alertas_semana"] = int(len(df_empresa_alertas))
-            resultado[id_empresa]["resumo"]["alertas_por_motivo"] = (
-                df_empresa_alertas["motivo_resumido"]
-                .value_counts()
-                .to_dict()
-            )
-            resultado[id_empresa]["resumo"]["tipo_alertas"] = (
-                df_empresa_alertas["tipo_alerta"]
-                .value_counts()
-                .to_dict()
-            )
+            res_emp = resultado[id_empresa]
+            res_emp["resumo"]["qte_alertas_semana"]    = int(len(df_emp_al))
+            res_emp["resumo"]["alertas_por_motivo"]    = df_emp_al["motivo_resumido"].value_counts().to_dict()
+            res_emp["resumo"]["tipo_alertas"]          = df_emp_al["tipo_alerta"].value_counts().to_dict()
 
-            for dia, df_diario_alertas in df_empresa_alertas.groupby(df_empresa_alertas["data_hora_iso"].dt.date):
-                data = str(dia)
+            for dia, df_dia_al in df_emp_al.groupby(df_emp_al["data_hora_iso"].dt.date):
+                data       = str(dia)
                 dia_semana = pd.Timestamp(dia).day_name()
+                res_emp["dias"].setdefault(data, _estrutura_dia(dia_semana))
+                res_emp["dias"][data]["qte_alertas"]         = int(len(df_dia_al))
+                res_emp["dias"][data]["alertas_por_motivo"]  = df_dia_al["motivo_resumido"].value_counts().to_dict()
+                res_emp["dias"][data]["tipo_alertas"]        = df_dia_al["tipo_alerta"].value_counts().to_dict()
 
-                if data not in resultado[id_empresa]["dias"]:
-                    resultado[id_empresa]["dias"][data] = {
-                        "dia_semana": str(dia_semana),
-                        "custo_opex_desperdicado": 0.0,
-                        "qte_alertas": 0,
-                        "alertas_por_motivo": {},
-                        "tipo_alertas": {}
-                    }
+            for (id_linha, nome_linha), df_lin_al in df_emp_al.groupby(["id_linha", "nome_linha"]):
+                res_emp["linhas"].setdefault(id_linha, _estrutura_resumo_linha(nome_linha))
+                res_lin = res_emp["linhas"][id_linha]
 
-                resultado[id_empresa]["dias"][data]["qte_alertas"] = int(len(df_diario_alertas))
-                resultado[id_empresa]["dias"][data]["alertas_por_motivo"] = (
-                    df_diario_alertas["motivo_resumido"]
-                    .value_counts()
-                    .to_dict()
-                )
-                resultado[id_empresa]["dias"][data]["tipo_alertas"] = (
-                    df_diario_alertas["tipo_alerta"]
-                    .value_counts()
-                    .to_dict()
-                )
+                res_lin["resumo"]["qte_alertas"]        = int(len(df_lin_al))
+                res_lin["resumo"]["alertas_por_motivo"] = df_lin_al["motivo_resumido"].value_counts().to_dict()
+                res_lin["resumo"]["tipo_alertas"]       = df_lin_al["tipo_alerta"].value_counts().to_dict()
 
-            for (id_linha, nome_linha), df_linha_alertas in df_empresa_alertas.groupby(["id_linha", "nome_linha"]):
-                print(f"[dashboardOperacao] Processando linha {id_linha} - {nome_linha}")
-
-                if id_linha not in resultado[id_empresa]["linhas"]:
-                    resultado[id_empresa]["linhas"][id_linha] = {
-                        "nome": nome_linha,
-                        "resumo": {
-                            "custo_opex_desperdicado": 0.0,
-                            "qte_alertas": 0,
-                            "alertas_por_motivo": {},
-                            "tipo_alertas": {}
-                        },
-                        "dias": {},
-                        "servidores": {}
-                    }
-
-                qte_alertas_linha = len(df_linha_alertas)
-                print("[dashboardOperacao] Quantidade de alertas da linha:", qte_alertas_linha)
-
-                resultado[id_empresa]["linhas"][id_linha]["resumo"]["qte_alertas"] = int(qte_alertas_linha)
-                resultado[id_empresa]["linhas"][id_linha]["resumo"]["alertas_por_motivo"] = (
-                    df_linha_alertas["motivo_resumido"]
-                    .value_counts()
-                    .to_dict()
-                )
-                resultado[id_empresa]["linhas"][id_linha]["resumo"]["tipo_alertas"] = (
-                    df_linha_alertas["tipo_alerta"]
-                    .value_counts()
-                    .to_dict()
-                )
-
-                for dia, df_diario_linha in df_linha_alertas.groupby(df_linha_alertas["data_hora_iso"].dt.date):
-                    data = str(dia)
+                for dia, df_dia_lin_al in df_lin_al.groupby(df_lin_al["data_hora_iso"].dt.date):
+                    data       = str(dia)
                     dia_semana = pd.Timestamp(dia).day_name()
-                    qte_alertas_dia_linha = len(df_diario_linha)
+                    res_lin["dias"].setdefault(data, _estrutura_dia(dia_semana))
+                    res_lin["dias"][data]["qte_alertas"]         = int(len(df_dia_lin_al))
+                    res_lin["dias"][data]["alertas_por_motivo"]  = df_dia_lin_al["motivo_resumido"].value_counts().to_dict()
+                    res_lin["dias"][data]["tipo_alertas"]        = df_dia_lin_al["tipo_alerta"].value_counts().to_dict()
 
-                    print(f"[dashboardOperacao] Linha: {id_linha} | Dia: {data} | Quantidade: {qte_alertas_dia_linha}")
+                for (id_rbc, nome_rbc), df_rbc_al in df_lin_al.groupby(["id_rbc", "nome_rbc"]):
+                    res_lin["servidores"].setdefault(id_rbc, _estrutura_resumo_rbc(nome_rbc))
+                    res_rbc = res_lin["servidores"][id_rbc]
 
-                    if data not in resultado[id_empresa]["linhas"][id_linha]["dias"]:
-                        resultado[id_empresa]["linhas"][id_linha]["dias"][data] = {
-                            "dia_semana": str(dia_semana),
-                            "custo_opex_desperdicado": 0.0,
-                            "qte_alertas": 0,
-                            "alertas_por_motivo": {},
-                            "tipo_alertas": {}
-                        }
+                    res_rbc["resumo"]["qte_alertas"]        = int(len(df_rbc_al))
+                    res_rbc["resumo"]["alertas_por_motivo"] = df_rbc_al["motivo_resumido"].value_counts().to_dict()
+                    res_rbc["resumo"]["tipo_alertas"]       = df_rbc_al["tipo_alerta"].value_counts().to_dict()
 
-                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["qte_alertas"] = int(qte_alertas_dia_linha)
-                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["alertas_por_motivo"] = (
-                        df_diario_linha["motivo_resumido"]
-                        .value_counts()
-                        .to_dict()
-                    )
-                    resultado[id_empresa]["linhas"][id_linha]["dias"][data]["tipo_alertas"] = (
-                        df_diario_linha["tipo_alerta"]
-                        .value_counts()
-                        .to_dict()
-                    )
-
-                for (id_rbc, nome_rbc), df_rbc_alertas in df_linha_alertas.groupby(["id_rbc", "nome_rbc"]):
-                    qte_alertas_rbc = len(df_rbc_alertas)
-                    print(f"[dashboardOperacao] RBC {id_rbc} - {nome_rbc} | Alertas {qte_alertas_rbc}")
-
-                    if id_rbc not in resultado[id_empresa]["linhas"][id_linha]["servidores"]:
-                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc] = {
-                            "nome": nome_rbc,
-                            "resumo": {
-                                "custo_opex_desperdicado": 0.0,
-                                "qte_alertas": 0,
-                                "alertas_por_motivo": {},
-                                "tipo_alertas": {}
-                            },
-                            "dias": {}
-                        }
-
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["qte_alertas"] = int(qte_alertas_rbc)
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["alertas_por_motivo"] = (
-                        df_rbc_alertas["motivo_resumido"]
-                        .value_counts()
-                        .to_dict()
-                    )
-                    resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["resumo"]["tipo_alertas"] = (
-                        df_rbc_alertas["tipo_alerta"]
-                        .value_counts()
-                        .to_dict()
-                    )
-
-
-                    for dia, df_diario_rbc in df_rbc_alertas.groupby(df_rbc_alertas["data_hora_iso"].dt.date):
-                        data = str(dia)
+                    for dia, df_dia_rbc_al in df_rbc_al.groupby(df_rbc_al["data_hora_iso"].dt.date):
+                        data       = str(dia)
                         dia_semana = pd.Timestamp(dia).day_name()
-                        qte_alertas_dia_rbc = len(df_diario_rbc)
+                        res_rbc["dias"].setdefault(data, _estrutura_dia(dia_semana))
+                        res_rbc["dias"][data]["qte_alertas"]         = int(len(df_dia_rbc_al))
+                        res_rbc["dias"][data]["alertas_por_motivo"]  = df_dia_rbc_al["motivo_resumido"].value_counts().to_dict()
+                        res_rbc["dias"][data]["tipo_alertas"]        = df_dia_rbc_al["tipo_alerta"].value_counts().to_dict()
 
-                        print(f"[dashboardOperacao] RBC: {id_rbc} | Dia: {data} | Quantidade: {qte_alertas_dia_rbc}")
+    # ── Um JSON por empresa em client/ ───────────────────────────────────
+    for id_empresa, dados_empresa in resultado.items():
+        nome_empresa = dados_empresa.get("nome", str(id_empresa))
+        salvar_json_client(
+            payload=dados_empresa,
+            bucket=bucket,
+            nome_empresa=nome_empresa,
+            tipo="operacao",
+        )
 
-                        if data not in resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"]:
-                            resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data] = {
-                                "dia_semana": str(dia_semana),
-                                "custo_opex_desperdicado": 0.0,
-                                "qte_alertas": 0,
-                                "alertas_por_motivo": {},
-                                "tipo_alertas": {}
-                            }
-
-                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["qte_alertas"] = int(qte_alertas_dia_rbc)
-                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["alertas_por_motivo"] = (
-                            df_diario_rbc["motivo_resumido"]
-                            .value_counts()
-                            .to_dict()
-                        )
-                        resultado[id_empresa]["linhas"][id_linha]["servidores"][id_rbc]["dias"][data]["tipo_alertas"] = (
-                            df_diario_rbc["tipo_alerta"]
-                            .value_counts()
-                            .to_dict()
-                        )
-
-    bucket = os.getenv("S3_BUCKET")
-    salvar_json_client(json_dashboard=resultado, bucket=bucket, tipo="operacao")
-    print("[dashboardOperacao] Arquivo saida.json salvo com sucesso.")
-    print("[dashboardOperacao] Processo finalizado.")
+    print("[dashboardOperacao] Finalizado.")
 
 
-def main(event):
-    """
-    Função principal do script.
-    Fluxo:
-    1. Lê o nome do bucket no .env. NAO MAIS LMAO
-    2. Busca os arquivos do S3.     
-    3. Junta os arquivos em DataFrames.
-    4. Gera o dashboard operacional.
-    """
-    print("\n[main] Iniciando script...")
+# ---------------------------------------------------------------------------
+# Orchestration
+# ---------------------------------------------------------------------------
 
-    bucket = event.get("bucket")
-    print("[main] Bucket carregado do .env:", bucket)
-
+def main(event: dict) -> dict:
+    bucket = event.get("bucket") or os.getenv("S3_BUCKET")
     if not bucket:
-        raise ValueError("Variável de ambiente S3_BUCKET não encontrada.")
+        raise ValueError("Bucket não informado no evento nem em S3_BUCKET.")
 
-    df_principal_tratado, df_principal_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
+    print(f"[main] Bucket: {bucket}")
 
-    print("[main] Chamando dashboardOperacao...")
+    df_tratado, df_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
+
     dashboardOperacao(
-        df_tratado=df_principal_tratado,
-        df_alertas=df_principal_alertas
+        df_tratado=df_tratado,
+        df_alertas=df_alertas,
+        bucket=bucket,
     )
+
+    return {"ok": True, "bucket": bucket}
+
 
 def lambda_handler(event, context):
     try:
+        print("[LAMBDA] Evento recebido:", json.dumps(event, ensure_ascii=False, default=str))
+        result = main(event or {})
         return {
             "statusCode": 200,
-             "body": json.dumps
-                (
-                    main(event or {}),
-                    ensure_ascii=False,
-                    default=str
-                )
-             }
-    except Exception as e:
-        return 
-        {
-            "statusCode": 500,
-            "body": json.dumps
-                (
-                    {
-                    "ok": False,
-                    "erro": str(e)
-                    },
-                ensure_ascii=False
-                )
+            "body": json.dumps(result, ensure_ascii=False, default=str),
         }
-# Garante que o main só rode quando o arquivo for executado diretamente.
-# Isso evita execução automática caso esse arquivo seja importado por outro script.
-# if __name__ == "__main__":
-#     main()
+    except Exception as e:
+        print(f"[ERRO] {e}")
+        return {                          # ← return and dict on the same line (bug fix)
+            "statusCode": 500,
+            "body": json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False),
+        }
