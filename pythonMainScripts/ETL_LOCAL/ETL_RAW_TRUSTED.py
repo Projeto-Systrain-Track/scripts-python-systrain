@@ -7,6 +7,7 @@ from typing import Any, Optional
 from datetime import datetime, timedelta
 import boto3
 from botocore.exceptions import ClientError
+from urllib.parse import unquote_plus
 import numpy as np
 import pandas as pd
 import mysql.connector
@@ -371,7 +372,16 @@ def arquivo_existe(bucket, key):
 
 
 def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
+    print(bucket)
+    print(key)
+
+    print('end')
+
     s3 = boto3.client("s3", **cfg_s3())
+    
+    print(bucket)
+    print(key)
+
     print(f"[S3] Baixando s3://{bucket}/{key} ...")
     verificar_existe = arquivo_existe(bucket=bucket, key=key)
     if verificar_existe:
@@ -418,7 +428,7 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
 
 
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-    df = extrair_csv_s3(bucket=bucket, key=key)
+    df = extrair_csv_s3(bucket, key)
     if df is not None:
         mac_adress_servidor = df["endereco_mac"].dropna().unique().tolist()
         print(f"[banco] Buscando mapeamento para {len(mac_adress_servidor)} MAC(s)...")
@@ -708,52 +718,161 @@ def build_json(df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
+def extrair_arquivos_do_evento_s3(event: dict) -> list[tuple[str, str]]:
+    arquivos = []
 
-def main(event):
-    bucket = event.get("bucket")
-    key    = event.get("key")
+    records = event.get("Records", [])
 
-    df, df_alertas = extrair_e_enriquecer(bucket=bucket, key=key)
+    for record in records:
+        if record.get("eventSource") != "aws:s3":
+            continue
+
+        event_name = record.get("eventName", "")
+
+        if not event_name.startswith("ObjectCreated:"):
+            print(f"[S3] Ignorando evento não relacionado a criação: {event_name}")
+            continue
+
+        bucket = record["s3"]["bucket"]["name"]
+        key = unquote_plus(record["s3"]["object"]["key"])
+
+        print(f"[S3] Evento recebido: s3://{bucket}/{key}")
+
+        # evita loop infinito, porque a própria Lambda salva em trusted/
+        if not key.startswith("raw/"):
+            print(f"[S3] Ignorando arquivo fora de raw/: {key}")
+            continue
+
+        if not key.lower().endswith(".csv"):
+            print(f"[S3] Ignorando arquivo que não é CSV: {key}")
+            continue
+
+        arquivos.append((bucket, key))
+
+    return arquivos
+
+
+def processar_arquivo_s3(bucket: str, key: str) -> dict:
+    print(f"[ETL] Processando arquivo: s3://{bucket}/{key}")
+
+    df, df_alertas = extrair_e_enriquecer(bucket, key)
+
+    payload_diario = {}
 
     if df is not None:
-        # ── CSV diário e semanal ──────────────────────────────────────────
         df_semanal = atualizar_semanal(bucket=bucket, df=df)
-        salvar_csv_trusted(bucket=bucket, df=df_semanal, tipo="semanal-tratados")
-        salvar_csv_trusted(df=df, bucket=bucket, tipo="tratado")
 
-        # ── JSON diário ───────────────────────────────────────────────────
+        salvar_csv_trusted(
+            bucket=bucket,
+            df=df_semanal,
+            tipo="semanal-tratados",
+        )
+
+        salvar_csv_trusted(
+            df=df,
+            bucket=bucket,
+            tipo="tratado",
+        )
+
         print("[JSON] Construindo JSON diário...")
         payload_diario = build_json(df)
-        salvar_json_trusted(payload=payload_diario, df_ref=df, bucket=bucket, tipo="json")
 
-        # ── JSON semanal ──────────────────────────────────────────────────
+        salvar_json_trusted(
+            payload=payload_diario,
+            df_ref=df,
+            bucket=bucket,
+            tipo="json",
+        )
+
         print("[JSON] Construindo JSON semanal...")
         payload_semanal = build_json(df_semanal)
-        salvar_json_trusted(payload=payload_semanal, df_ref=df_semanal, bucket=bucket, tipo="semanal-json")
+
+        salvar_json_trusted(
+            payload=payload_semanal,
+            df_ref=df_semanal,
+            bucket=bucket,
+            tipo="semanal-json",
+        )
 
     if df_alertas is not None and not df_alertas.empty:
         print("\nRegistros de alerta gerados:")
         print(
             df_alertas[[
-                "nome_rbc", "componente_afetado", "tipo_alerta",
-                "valor_medido", "limite_atencao", "limite_critico",
+                "nome_rbc",
+                "componente_afetado",
+                "tipo_alerta",
+                "valor_medido",
+                "limite_atencao",
+                "limite_critico",
             ]].to_string(index=False)
         )
-        salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="alerta")
-        salvar_csv_trusted(df=df_alertas, bucket=bucket, tipo="semanal-alertas")
 
-    return payload_diario if df is not None else {}
+        salvar_csv_trusted(
+            df=df_alertas,
+            bucket=bucket,
+            tipo="alerta",
+        )
+
+        salvar_csv_trusted(
+            df=df_alertas,
+            bucket=bucket,
+            tipo="semanal-alertas",
+        )
+
+    return payload_diario
+
+
+def main(event):
+    arquivos = extrair_arquivos_do_evento_s3(event or {})
+
+    if not arquivos:
+        print("[ETL] Nenhum arquivo válido para processar.")
+        return {
+            "ok": True,
+            "mensagem": "Nenhum arquivo válido para processar.",
+            "arquivos_processados": 0,
+        }
+
+    resultados = []
+
+    for bucket, key in arquivos:
+        resultado = processar_arquivo_s3(bucket=bucket, key=key)
+
+        resultados.append({
+            "bucket": bucket,
+            "key": key,
+            "resultado": resultado,
+        })
+
+    return {
+        "ok": True,
+        "arquivos_processados": len(resultados),
+        "resultados": resultados,
+    }
 
 
 def lambda_handler(event, context):
     try:
+        print("[LAMBDA] Evento recebido:")
+        print(json.dumps(event, ensure_ascii=False, default=str))
+
         result = main(event or {})
+
         return {
             "statusCode": 200,
             "body": json.dumps(result, ensure_ascii=False, default=str),
         }
+
     except Exception as e:
+        print(f"[ERRO] {e}")
+
         return {
             "statusCode": 500,
-            "body": json.dumps({"ok": False, "erro": str(e)}, ensure_ascii=False),
+            "body": json.dumps(
+                {
+                    "ok": False,
+                    "erro": str(e),
+                },
+                ensure_ascii=False,
+            ),
         }
