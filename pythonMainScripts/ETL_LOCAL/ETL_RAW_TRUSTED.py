@@ -378,7 +378,7 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
     print('end')
 
     s3 = boto3.client("s3", **cfg_s3())
-    
+
     print(bucket)
     print(key)
 
@@ -400,17 +400,33 @@ def extrair_csv_s3(bucket: str, key: str) -> pd.DataFrame:
     return None
 
 
-def caminho_para_tratado(df: pd.DataFrame, tipo: str):
-    nome_empresa = df["nome_empresa"].dropna().unique()
-    nome_empresa = nome_empresa[0]
-    nome_empresa = nome_empresa.replace(" ", "_").lower()
-    mac_adress = df["endereco_mac"].dropna().unique()
-    mac_adress = mac_adress[0]
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
+
+def _slug_empresa(df: pd.DataFrame) -> str:
+    """Retorna o nome da empresa normalizado para uso em paths S3."""
+    nome = df["nome_empresa"].dropna().unique()
+    nome = nome[0] if len(nome) else "sem_empresa"
+    return str(nome).strip().replace(" ", "_").lower()
+
+
+def caminho_para_tratado(df: pd.DataFrame, tipo: str) -> str:
+    """
+    Gera o caminho S3 de destino de acordo com o tipo de artefato.
+
+    Buckets / prefixos:
+      trusted/  → CSVs por máquina (diário e semanal) e alertas
+      client/   → JSONs por empresa (diário e semanal)
+    """
+    nome_empresa = _slug_empresa(df)
+    mac_adress = df["endereco_mac"].dropna().unique()[0]
     data_atual = datetime.now()
     ano  = data_atual.year
     mes  = data_atual.month
     dia  = data_atual.day
 
+    # ── trusted/ ──────────────────────────────────────────────────────────
     if tipo == "alerta":
         return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/alertas/abertos/{mac_adress}.csv"
     elif tipo == "tratado":
@@ -419,10 +435,14 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
         return f"trusted/{nome_empresa}/semanal/tratados/{mac_adress}.csv"
     elif tipo == "semanal-alertas":
         return f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
+
+    # ── client/ ───────────────────────────────────────────────────────────
     elif tipo == "json":
-        return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/json/{mac_adress}.json"
+        # One JSON per empresa, updated on every daily run.
+        return f"client/{nome_empresa}/latest.json"
     elif tipo == "semanal-json":
-        return f"trusted/{nome_empresa}/semanal/json/{mac_adress}.json"
+        return f"client/{nome_empresa}/semanal.json"
+
     else:
         raise ValueError(f"Tipo desconhecido: {tipo}")
 
@@ -545,22 +565,41 @@ def salvar_csv_trusted(df: pd.DataFrame, bucket: str, tipo: str):
     return False
 
 
-def salvar_json_trusted(payload: dict, df_ref: pd.DataFrame, bucket: str, tipo: str = "json"):
+def salvar_json_cliente(payload: dict, df_ref: pd.DataFrame, bucket: str, tipo: str = "json"):
     """
-    Serializa `payload` como JSON e faz upload para o S3.
-    `df_ref` é usado apenas para derivar o caminho (nome_empresa / mac).
+    Serializa `payload` como JSON e faz upload para client/ no S3.
+
+    Paths gerados:
+      client/{nome_empresa}/latest.json   (tipo="json")
+      client/{nome_empresa}/semanal.json  (tipo="semanal-json")
+
+    Se já existir um JSON no destino, os dados das empresas são mesclados
+    para que um único arquivo consolide todas as máquinas da empresa,
+    independentemente do MAC que disparou este evento.
     """
     print(f"[JSON] Iniciando salvamento do JSON (tipo={tipo})...")
     caminho = caminho_para_tratado(df=df_ref, tipo=tipo)
     print(f"[JSON] Caminho: s3://{bucket}/{caminho}")
 
+    s3 = boto3.client("s3", **cfg_s3())
+
+    # ── Mesclar com JSON existente (se houver) ────────────────────────────
+    if arquivo_existe(bucket=bucket, key=caminho):
+        try:
+            resposta = s3.get_object(Bucket=bucket, Key=caminho)
+            payload_antigo = json.loads(resposta["Body"].read().decode("utf-8"))
+            payload = _mesclar_payloads(payload_antigo, payload)
+            print(f"[JSON] JSON existente mesclado com sucesso.")
+        except Exception as e:
+            print(f"[JSON] Aviso: não foi possível mesclar com JSON existente — {e}")
+
+    # ── Serializar e fazer upload ─────────────────────────────────────────
     conteudo = json.dumps(payload, ensure_ascii=False, default=str, indent=2).encode("utf-8")
     nome_arquivo_local = caminho.replace("/", "_") + ".json"
 
     with open(nome_arquivo_local, "wb") as f:
         f.write(conteudo)
 
-    s3 = boto3.client("s3", **cfg_s3())
     try:
         s3.upload_file(
             Filename=nome_arquivo_local,
@@ -573,6 +612,49 @@ def salvar_json_trusted(payload: dict, df_ref: pd.DataFrame, bucket: str, tipo: 
     except Exception as e:
         print(f"[JSON] Erro no upload: {e}")
     return False
+
+
+def _mesclar_payloads(antigo: dict, novo: dict) -> dict:
+    """
+    Combina dois payloads no formato {"empresas": [...]} usando id_empresa
+    como chave. Dentro de cada empresa, as linhas são combinadas por id_linha,
+    e os RBCs por id_rbc — garantindo que um único JSON por empresa contenha
+    dados de todos os seus servidores mesmo que sejam enviados em eventos S3
+    separados.
+    """
+    def index_by(lst: list, key: str) -> dict:
+        return {item[key]: item for item in lst if item.get(key) is not None}
+
+    empresas_antigas = index_by(antigo.get("empresas", []), "id_empresa")
+    empresas_novas   = index_by(novo.get("empresas", []),   "id_empresa")
+
+    for id_emp, emp_nova in empresas_novas.items():
+        if id_emp not in empresas_antigas:
+            empresas_antigas[id_emp] = emp_nova
+            continue
+
+        emp_antiga = empresas_antigas[id_emp]
+        linhas_antigas = index_by(emp_antiga.get("linhas", []), "id_linha")
+        linhas_novas   = index_by(emp_nova.get("linhas", []),   "id_linha")
+
+        for id_lin, lin_nova in linhas_novas.items():
+            if id_lin not in linhas_antigas:
+                linhas_antigas[id_lin] = lin_nova
+                continue
+
+            lin_antiga = linhas_antigas[id_lin]
+            rbcs_antigos = index_by(lin_antiga.get("rbc", []), "id_rbc")
+            rbcs_novos   = index_by(lin_nova.get("rbc", []),   "id_rbc")
+
+            # Novos RBCs substituem / adicionam; RBCs não mencionados são mantidos.
+            rbcs_antigos.update(rbcs_novos)
+            lin_antiga["rbc"] = sorted(rbcs_antigos.values(), key=lambda x: str(x.get("id_rbc") or ""))
+
+        emp_antiga["linhas"] = sorted(linhas_antigas.values(), key=lambda x: str(x.get("id_linha") or ""))
+
+    return {
+        "empresas": sorted(empresas_antigas.values(), key=lambda x: str(x.get("id_empresa") or ""))
+    }
 
 
 def juntar_dataframes(df1: pd.DataFrame, df2: pd.DataFrame):
@@ -738,7 +820,7 @@ def extrair_arquivos_do_evento_s3(event: dict) -> list[tuple[str, str]]:
 
         print(f"[S3] Evento recebido: s3://{bucket}/{key}")
 
-        # evita loop infinito, porque a própria Lambda salva em trusted/
+        # evita loop infinito, porque a própria Lambda salva em trusted/ e client/
         if not key.startswith("raw/"):
             print(f"[S3] Ignorando arquivo fora de raw/: {key}")
             continue
@@ -762,6 +844,7 @@ def processar_arquivo_s3(bucket: str, key: str) -> dict:
     if df is not None:
         df_semanal = atualizar_semanal(bucket=bucket, df=df)
 
+        # ── trusted/: CSVs por máquina ────────────────────────────────────
         salvar_csv_trusted(
             bucket=bucket,
             df=df_semanal,
@@ -774,24 +857,25 @@ def processar_arquivo_s3(bucket: str, key: str) -> dict:
             tipo="tratado",
         )
 
+        # ── client/: JSONs por empresa ────────────────────────────────────
         print("[JSON] Construindo JSON diário...")
         payload_diario = build_json(df)
 
-        salvar_json_trusted(
+        salvar_json_cliente(
             payload=payload_diario,
             df_ref=df,
             bucket=bucket,
-            tipo="json",
+            tipo="json",           # → client/{empresa}/latest.json
         )
 
         print("[JSON] Construindo JSON semanal...")
         payload_semanal = build_json(df_semanal)
 
-        salvar_json_trusted(
+        salvar_json_cliente(
             payload=payload_semanal,
             df_ref=df_semanal,
             bucket=bucket,
-            tipo="semanal-json",
+            tipo="semanal-json",   # → client/{empresa}/semanal.json
         )
 
     if df_alertas is not None and not df_alertas.empty:
