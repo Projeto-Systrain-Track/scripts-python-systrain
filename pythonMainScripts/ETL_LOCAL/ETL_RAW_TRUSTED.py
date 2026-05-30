@@ -429,14 +429,12 @@ def caminho_para_tratado(df: pd.DataFrame, tipo: str):
         return f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/json/{mac_adress}.json"
     elif tipo == "semanal-json":
         return f"trusted/{nome_empresa}/semanal/json/{mac_adress}.json"
-    else:
-        raise ValueError(f"Tipo desconhecido: {tipo}")
-
-        caminho = f"trusted/{nome_empresa}/semanal/alertas/{mac_adress}.csv"
-        
     elif tipo == "incidentes":
         caminho = f"trusted/{nome_empresa}/{ano}/{mes}/{dia}/incidentes/incidentes_{ano}-{mes}-{dia}.csv"
+    else:
+        raise ValueError(f"Tipo desconhecido: {tipo}")
     return caminho
+        
 
 def extrair_e_enriquecer(bucket: str, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = extrair_csv_s3(bucket=bucket, key=key)

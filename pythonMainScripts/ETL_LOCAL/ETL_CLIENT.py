@@ -276,9 +276,7 @@ def salvar_json_client(json_dashboard: dict, bucket: str, tipo: str):
     if tipo == "operacao":
         nome_arquivo = "dashboard_operacao.json"
     elif tipo.startswith("incidentes"):
-        #nome_da_empresa = tipo.replace("incidentes_", "")
         nome_arquivo = f"dashboard_incidentes.json"
-        #nome_arquivo = f"dashboard_incidentes_{nome_da_empresa}.json"
     elif tipo == "visao_geral":
         nome_arquivo = "dashboard_visao_geral.json"
     elif tipo == "detalhe_linha":
@@ -725,9 +723,12 @@ def dashboardIncidentes(bucket: str, prefix_empresa: str):
         vento_kmh = vento_ms * 3.6
         
         componente_gatilho = str(getattr(row, "componente_afetado", "GERAL")).upper()
+        
+        id_empresa_atual = int(getattr(row, "id_empresa", 0))
+        nome_empresa_atual = str(getattr(row, "nome_empresa", "empresa desconhecida"))
 
         incidentes_lista.append({
-            #partw q alimenta o front
+            #parte q alimenta o front
             "detalhes_tela": {
                 "statusSLA": "risco" if nivel_formatado == "Alto" else "atencao",
                 "titulo": str(getattr(row, "descricao", "Alerta operacional")),
@@ -759,7 +760,9 @@ def dashboardIncidentes(bucket: str, prefix_empresa: str):
                 "id_rbc": int(getattr(row, "id_rbc", 0)),
                 "nome_rbc": str(getattr(row, "nome_rbc", "Desconhecido")),
                 "score_saude_original": score_atual,
-                "data_hora_completa": data_hora_bruta
+                "data_hora_completa": data_hora_bruta,
+                "id_empresa": id_empresa_atual,
+                "nome_empresa": nome_empresa_atual,
             }
         })
 
@@ -777,8 +780,6 @@ def dashboardIncidentes(bucket: str, prefix_empresa: str):
         "lista_incidentes": incidentes_lista
     }
 
-    nome_da_empresa = prefix_empresa.split("/")[1] 
-    #salvar_json_client(json_dashboard=resultado_json, bucket=bucket, tipo=f"incidentes_{nome_da_empresa}")  
     salvar_json_client(json_dashboard=resultado_json, bucket=bucket, tipo=f"incidentes")  
 #==============================================================================================================================================    
 
