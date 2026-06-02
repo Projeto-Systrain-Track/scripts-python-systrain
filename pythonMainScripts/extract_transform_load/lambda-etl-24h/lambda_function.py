@@ -145,14 +145,14 @@ def caminho_client(nome_empresa: str, tipo: str) -> str:
       client/{empresa}/dashboard_operacao.json
       client/{empresa}/dashboard_incidentes.json
       client/{empresa}/dashboard_visao_geral.json
-      client/{empresa}/dashboard_detalhe_linha.json
+      client/{empresa}/metricas.json
     """
     slug = _slug_empresa(nome_empresa)
     nomes = {
         "operacao":     "dashboard_operacao.json",
         "incidentes":   "dashboard_incidentes.json",
         "visao_geral":  "dashboard_visao_geral.json",
-        "detalhe_linha":"dashboard_detalhe_linha.json",
+        "detalhe_linha":"metricas.json",
     }
     if tipo not in nomes:
         raise ValueError(f"Tipo de dashboard desconhecido: {tipo!r}")
@@ -572,14 +572,208 @@ def main(event: dict) -> dict:
 
     print(f"[main] Bucket: {bucket}")
 
-    df_tratado, df_alertas = buscar_e_juntar_arquivos_s3(bucket=bucket)
+    df_tratado, df_alertas = buscar_e_juntar_arquivos_s3(
+        bucket=bucket
+    )
 
     dashboardOperacao(
         df_tratado=df_tratado,
         df_alertas=df_alertas,
         bucket=bucket,
     )
+
+    dashboardDetalheLinha(
+        df_tratado=df_tratado,
+        df_alertas=df_alertas,
+        bucket=bucket,
+    )
+
+    dashboardIncidentesLinha(
+    df_alertas=df_alertas,
+    bucket=bucket
+)
     return {"ok": True, "bucket": bucket}
+
+
+
+
+def dashboardDetalheLinha(df_tratado, df_alertas, bucket):
+
+    if df_tratado is None or df_tratado.empty:
+        print("[dashboardDetalheLinha] Sem dados.")
+        return
+
+    df = df_tratado.copy()
+
+    if "endereco_mac" in df.columns:
+        df["endereco_mac"] = df["endereco_mac"].map(limpar_mac)
+
+    if df_alertas is None:
+        df_alertas = pd.DataFrame()
+    else:
+        df_alertas = df_alertas.copy()
+        if not df_alertas.empty and "endereco_mac" in df_alertas.columns:
+            df_alertas["endereco_mac"] = df_alertas["endereco_mac"].map(limpar_mac)
+
+    if not df_alertas.empty:
+        alertas_rbc = df_alertas.groupby(
+            ["id_linha", "id_rbc"]
+        ).size().reset_index(name="alertas_extras")
+    else:
+        alertas_rbc = pd.DataFrame(columns=["id_linha", "id_rbc", "alertas_extras"])
+
+    df = df.merge(alertas_rbc, on=["id_linha", "id_rbc"], how="left")
+    df["alertas_extras"] = df["alertas_extras"].fillna(0)
+
+    cols_num = [
+        "percentual_uso_cpu", "percentual_uso_ram", "percentual_uso_disco",
+        "latencia_ping_ms", "total_alertas", "total_incidentes_cpu",
+        "total_incidentes_ram", "total_incidentes_disco", "total_incidentes_latencia"
+    ]
+
+    for c in cols_num:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    colunas_estruturais = ["numero_linha", "cor_linha", "trecho", "id_empresa", "nome_empresa", "status_operacional"]
+    for c in colunas_estruturais:
+        if c not in df.columns:
+            df[c] = None
+
+    agg = df.groupby(
+        ["id_linha", "nome_linha", "id_rbc", "nome_rbc"],
+        as_index=False
+    ).agg(
+        macAdress=("endereco_mac", "first"),
+        cpu=("percentual_uso_cpu", "mean"),
+        ram=("percentual_uso_ram", "mean"),
+        disco=("percentual_uso_disco", "mean"),
+        latencia=("latencia_ping_ms", "mean"),
+        status=("status_operacional", "last"),
+        total=("total_alertas", "sum"),
+        cpu_inc=("total_incidentes_cpu", "sum"),
+        ram_inc=("total_incidentes_ram", "sum"),
+        disco_inc=("total_incidentes_disco", "sum"),
+        lat_inc=("total_incidentes_latencia", "sum"),
+        numero_linha=("numero_linha", "first"),
+        cor_linha=("cor_linha", "first"),
+        trecho=("trecho", "first"),
+        id_empresa=("id_empresa", "first"),
+        nome_empresa=("nome_empresa", "first")
+    )
+
+    resultado = {}
+
+    for (id_linha, nome_linha), g in agg.groupby(["id_linha", "nome_linha"]):
+
+        id_linha = int(id_linha)
+
+        resultado[id_linha] = {
+            "rbcs": [
+                {
+                    "idRbc": int(r.id_rbc),
+                    "nomeServidor": r.nome_rbc,
+                    "macAdress": r.macAdress,
+                    "linha": {
+                        "idLinha": id_linha,
+                        "nomeLinha": nome_linha,
+                        "numeroLinha": int(r.numero_linha) if pd.notna(r.numero_linha) else None,
+                        "corLinha": r.cor_linha,
+                        "trecho": r.trecho
+                    },
+                    "empresa": {
+                        "idEmpresa": int(r.id_empresa) if pd.notna(r.id_empresa) else None,
+                        "razaoSocial": r.nome_empresa
+                    },
+                    "metricas": {
+                        "cpu": float(r.cpu or 0),
+                        "ram": float(r.ram or 0),
+                        "disco": float(r.disco or 0),
+                        "latencia": float(r.latencia or 0),
+                    },
+                    "status": str(r.status) if pd.notna(r.status) else "UNKNOWN",
+                    "incidentes": {
+                        "total": int(r.total or 0),
+                        "cpu": int(r.cpu_inc or 0),
+                        "ram": int(r.ram_inc or 0),
+                        "disco": int(r.disco_inc or 0),
+                        "latencia": int(r.lat_inc or 0),
+                    }
+                }
+                for r in g.itertuples(index=False)
+            ]
+        }
+
+    if not df_alertas.empty:
+        
+        for c in colunas_estruturais:
+            if c not in df_alertas.columns:
+                df_alertas[c] = None
+
+        rbc_faltantes = df_alertas.groupby(
+            ["id_linha", "nome_linha", "id_rbc", "nome_rbc"],
+            as_index=False
+        ).first()
+
+        for r in rbc_faltantes.itertuples(index=False):
+
+            id_linha = int(r.id_linha)
+
+            if id_linha not in resultado:
+                resultado[id_linha] = {"rbcs": []}
+            
+            linha_atual = resultado[id_linha]
+
+            if not any(x["idRbc"] == r.id_rbc for x in linha_atual["rbcs"]):
+
+                linha_atual["rbcs"].append({
+                    "idRbc": int(r.id_rbc),
+                    "nomeServidor": r.nome_rbc,
+                    "macAdress": r.endereco_mac if "endereco_mac" in df_alertas.columns and pd.notna(r.endereco_mac) else None,
+                    "linha": {
+                        "idLinha": id_linha,
+                        "nomeLinha": r.nome_linha,
+                        "numeroLinha": int(r.numero_linha) if pd.notna(r.numero_linha) else None,
+                        "corLinha": r.cor_linha,
+                        "trecho": r.trecho
+                    },
+                    "empresa": {
+                        "idEmpresa": int(r.id_empresa) if pd.notna(r.id_empresa) else None,
+                        "razaoSocial": r.nome_empresa
+                    },
+                    "metricas": {
+                        "cpu": 0.0,
+                        "ram": 0.0,
+                        "disco": 0.0,
+                        "latencia": 0.0,
+                    },
+                    "status": str(r.status_operacional) if pd.notna(r.status_operacional) else "UNKNOWN",
+                    "incidentes": {
+                        "total": 0,
+                        "cpu": 0,
+                        "ram": 0,
+                        "disco": 0,
+                        "latencia": 0
+                    }
+                })
+
+    s3 = boto3.client("s3", **cfg_s3())
+
+    for id_linha, payload in resultado.items():
+
+        key = f"client/linhas/{id_linha}/metricas/metricas.json"
+
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(payload, ensure_ascii=False, default=str),
+            ContentType="application/json"
+        )
+
+        print(f"[DETALHE LINHA] Sobrescrito: {key}")
+
+
+
 
 
 def lambda_handler(event, context):
