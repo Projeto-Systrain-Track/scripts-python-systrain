@@ -18,7 +18,7 @@ load_dotenv(dotenv_path=".env.dev")
 INTERVALO_SEGUNDOS  = 10         
 COLETAS_POR_LOTE    = 6         
 OUTPUT_DIR          = "raw"
-NOME_BUCKET         = os.getenv("S3_BUCKET_NAME")
+NOME_BUCKET         = "systrain-bucket-csv"
 
 ATRIBUTOS_PROCESSOS = [
     "pid", "name", "username", "status", "create_time",
@@ -32,6 +32,7 @@ def _gerar_mac() -> str:
 
 ENDERECO_MAC = _gerar_mac().split("-")
 ENDERECO_MAC = "30" + "-" + ENDERECO_MAC[1] + "-" + ENDERECO_MAC[2] + "-" + ENDERECO_MAC[3] + "-" + ENDERECO_MAC[4] + "-" + ENDERECO_MAC[5] 
+
 
 s3 = boto3.client(
     "s3",
@@ -202,4 +203,4 @@ while True:
         contador = 0
         buffer   = []
 
-    time.sleep(INTERVALO_SEGUNDOS)
+    time.sleep(0.75)
