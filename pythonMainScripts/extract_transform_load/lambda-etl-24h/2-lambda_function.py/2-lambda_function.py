@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from email.mime import base
 import os
 from io import BytesIO
 from typing import Any
@@ -8,6 +9,9 @@ from botocore.exceptions import ClientError
 import pandas as pd
 from dotenv import load_dotenv
 import json
+
+import pandas as pd
+from collections import defaultdict
 
 load_dotenv()
 
@@ -594,100 +598,112 @@ def dashboardIncidentes(bucket: str, prefix_empresa: str):
 
 
 
-def dashboardIncidentesSemana(df_alertas: pd.DataFrame, bucket: str):
-    """
-    Gera um JSON com a  quantidade de incidentes por servidor
-    durante os últimos 7 dias.
-    """
+def dashboardIncidentesSemana(df_tratado: pd.DataFrame, df_alertas: pd.DataFrame, bucket: str):
 
     print("\n[dashboardIncidentesSemana] Iniciando processamento")
 
-    if df_alertas.empty:
-        print("[dashboardIncidentesSemana] df_alertas vazio.")
+    if df_tratado.empty and df_alertas.empty:
+        print("DataFrame vazio — nada a processar")
         return
 
+    df_tratado = df_tratado.copy()
     df_alertas = df_alertas.copy()
 
-    df_alertas = df_alertas.dropna(
-        subset=["data_hora_iso"]
-    )
 
-    agora = pd.Timestamp.now()
 
-    sete_dias_atras = agora - pd.Timedelta(days=7)
+    df_tratado["data_hora_envio"] = pd.to_datetime(df_tratado["data_hora_envio"], errors="coerce")
+    df_alertas["data_hora_envio"] = pd.to_datetime(df_alertas["data_hora_envio"], errors="coerce")
 
-    df_alertas = df_alertas[
-        (df_alertas["data_hora_iso"] >= sete_dias_atras)
-        &
-        (df_alertas["data_hora_iso"] <= agora)
-    ]
+    df_tratado["data"] = df_tratado["data_hora_envio"].dt.date
+    df_alertas["data"] = df_alertas["data_hora_envio"].dt.date
 
-    if df_alertas.empty:
-        print("[dashboardIncidentesSemana] Nenhum incidente na última semana.")
-        return
 
-    for (id_empresa, nome_empresa), df_empresa in (
-        df_alertas.groupby(["id_empresa", "nome_empresa"])
-    ):
+    df_tratado = _calcular_custo(df_tratado)
 
-        ranking_servidores = []
+    resultado = {}
 
-        for (id_rbc, nome_rbc), df_rbc in (
-            df_empresa.groupby(["id_rbc", "nome_rbc"])
-        ):
 
-            incidentes_por_dia = (
-                df_rbc
-                .groupby(df_rbc["data_hora_iso"].dt.date)
-                .size()
-                .to_dict()
-            )
 
-            ranking_servidores.append({
-                "id_rbc": int(id_rbc),
-                "nome_rbc": str(nome_rbc),
-                "total_incidentes": int(len(df_rbc)),
-                "incidentes_por_dia": {
-                    str(k): int(v)
-                    for k, v in incidentes_por_dia.items()
-                }
-            })
+    for (id_empresa, nome_empresa), df_emp in df_tratado.groupby(["id_empresa", "nome_empresa"]):
 
-        ranking_servidores.sort(
-            key=lambda servidor: servidor["total_incidentes"],
-            reverse=True
-        )
+        base = _estrutura_resumo_empresa(nome_empresa)
 
-        resultado_json = {
-            "atualizado_em": pd.Timestamp.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+        df_empresa_alertas = df_alertas[df_alertas["id_empresa"] == id_empresa]
 
-            "resumo_cards": {
-                "total_incidentes_semana": int(len(df_empresa)),
-                "total_servidores": int(
-                    df_empresa["id_rbc"].nunique()
-                ),
-                "servidor_mais_critico": (
-                    ranking_servidores[0]["nome_rbc"]
-                    if ranking_servidores
-                    else None
+        base["resumo"]["qte_alertas_semana"] = len(df_empresa_alertas)
+        base["resumo"]["alertas_por_motivo"] = df_empresa_alertas["motivo_resumido"].value_counts().to_dict()
+        base["resumo"]["tipo_alertas"] = df_empresa_alertas["tipo_alerta"].value_counts().to_dict()
+
+
+
+        for(id_linha, nome_linha), df_lin in df_emp.groupby(["id_linha", "nome_linha"]):
+
+            linha_objeto = {
+                "nome": nome_linha,
+                "servidores":{},
+                "dias": {}
+            }
+
+            df_linha_alertas = df_empresa_alertas[df_empresa_alertas["id_linha"] == id_linha]
+
+
+
+            for dia, df_dia in df_linha_alertas.groupby(df_linha_alertas["data"].dt.isoformat()):
+                data = str(dia)
+
+                linha_objeto["dias"].setdefault(
+                    data, _estrutura_dia(pd.Timestamp(dia).day_name())
                 )
-            },
 
-            "ranking_servidores": ranking_servidores
-        }
+                linha_objeto["dias"][data]["custo_opex_desperdicado"] = float(
+                    df_dia["custo_desperdicado"].sum()
+                )
 
+
+            for (id_rbc, nome_rbc), df_rbc in df_lin.groupby(["id_rbc", "nome_rbc"]):
+                
+                df_rbc_alertas = df_linha_alertas[df_linha_alertas["id_rbc"] == id_rbc] 
+
+                ranking_lotes = (
+                    df_rbc_alertas.groupby("data_hora_envio")
+                    .size()
+                    .reset_index(name="qte_alertas")
+                    .sort_values("data_hora_envio", ascending=False)
+                )
+
+                linha_objeto["servidores"][str(id_rbc)] = {
+                    "nome": nome_rbc,
+                    "resumo": {
+                        "qte_alertas": int(len(df_rbc_alertas)),
+                        "alertas_por_motivo": df_rbc_alertas["motivo_resumido"].value_counts().to_dict(),
+                        "tipo_alertas": df_rbc_alertas["tipo_alerta"].value_counts().to_dict(),
+                    },
+                    "ranking_lotes": [
+                        {
+                            "lote_envio": str(row["data_hora_envio"]),
+                            "qte_alertas": int(row["qte_alertas"])
+                        }
+                        for _, row in ranking_lotes.iterrows()
+                    ]
+                }
+
+
+        base["linhas"][str(id_linha)] = linha_objeto   
+    
+    resultado[str(id_empresa)] = base
+
+
+    for id_empresa, dados_empresa in resultado.items():
         salvar_json_client(
-            payload=resultado_json,
-            bucket=bucket,
-            nome_empresa=nome_empresa,
-            tipo="incidentes_semana"
+            payload = dados_empresa,
+            bucket = bucket,
+            nome_empresa = dados_empresa["nome"],
+            tipo = "operacao"
         )
 
-        print(
-            f"[dashboardIncidentesSemana] JSON gerado para empresa: {nome_empresa}"
-        )
+    return resultado
+        
+
 
 
 
